@@ -301,9 +301,10 @@ def collect_json(a):
     with ThreadPoolExecutor(max(4, len(jobs) + len(running) + 1)) as ex:
         infos = {j.jobid: ex.submit(scontrol_job, j.jobid) for j in jobs}
         probes = {j.jobid: ex.submit(probe_job, j) for j in running} if not a.no_procs else {}
-        prom_f = ex.submit(prom_window, prom_url(), uid, a.window)
+        prom_base = prom_url()
+        prom_f = ex.submit(prom_window, prom_base, uid, a.window) if prom_base else None
         try:
-            prom, prom_err = prom_f.result(), None
+            prom, prom_err = (prom_f.result(), None) if prom_f else ({}, "no Prometheus URL: set SQTOP_PROM_URL")
         except Exception as e:
             prom, prom_err = {}, f"prometheus: {e}"
         recs = [job_record(j, infos[j.jobid].result(), probes[j.jobid].result() if j.jobid in probes else None, prom, a)

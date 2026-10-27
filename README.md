@@ -111,7 +111,10 @@ sqtop --json --window 1h | jq '.jobs[] | select(any(.procs[]?; .cmd | test("vllm
   GPU stats, per-process %SM/%GMBW, the job's cgroup CPU/RAM, and its processes. Because the
   step runs inside the job's resource group, it sees only that job's GPUs.
 - History from before sqtop started is backfilled from the cluster's Prometheus (the jobstats
-  exporter, at 1-minute resolution), so charts cover the job's whole run.
+  exporter, at 1-minute resolution), so charts cover the job's whole run. The Prometheus URL comes
+  from `$SQTOP_PROM_URL`, or else from `PROM_SERVER` in the cluster's jobstats config
+  (`/usr/local/jobstats/config.py`). Without either, sqtop runs without history, and `--json` omits
+  `window` stats and says so in `errors`.
 - `--json` uses the same pieces as a one-shot: `squeue` + `scontrol`, a few Prometheus window
   queries, and one short `srun --overlap` per job, all in parallel.
 

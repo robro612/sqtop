@@ -159,9 +159,15 @@ def human_bytes(b):
         b /= 1024
 
 
+JOBSTATS_CONFIG = "/usr/local/jobstats/config.py"
+
+
 def prom_url():
+    """Prometheus base URL: $SQTOP_PROM_URL, else the cluster's jobstats config, else None (no history)."""
+    if os.environ.get("SQTOP_PROM_URL"):
+        return os.environ["SQTOP_PROM_URL"]
     try:
-        with open("/usr/local/jobstats/config.py") as f:
+        with open(JOBSTATS_CONFIG) as f:
             src = f.read()
         return re.search(r'PROM_SERVER\s*=\s*"([^"]+)"', src).group(1)
     except Exception:
