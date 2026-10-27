@@ -56,7 +56,25 @@ RES_STEPS = [1, 2, 5, 10, 30, 60, 120, 300, 600]   # chart seconds per braille d
 #   S|h|<pid> <rss KiB> <cpu s> <elapsed s> <args>        ps info for those pids
 #   C|h|<pid> <rss KiB> <cpu s> <elapsed s> <args>        job processes (CPU-only jobs: no GPU to ask)
 #   E|h|<t>                                               end of snapshot
+# Bash that sets $pids (comma-separated) to the job's own processes: every step except SLURM's extern
+# step and any step running an sqtop monitor (ours or another sqtop instance's, found by MONITOR_MARK).
+MONITOR_MARK = "sqtop-monitor"
+JOB_PIDS_SH = r'''
+allp=$(find "$jcg" -name cgroup.procs ! -path "*/step_extern/*" -exec cat {} + 2>/dev/null | sort -un)
+pids=
+if [ -n "$allp" ]; then
+  mon=$(grep -las MARK $(printf '/proc/%s/cmdline ' $allp) | sed 's|/proc/\([0-9]*\)/.*|\1|')
+  # "pid cgroup-path" per live process (read is a builtin: processes that exited meanwhile are skipped)
+  pids=$(for p in $allp; do { read -r l < /proc/$p/cgroup; } 2>/dev/null && echo "$p $l"; done |
+    awk -v me="$mystep" -v mon=" $(echo $mon) " '
+      match($2, /step_[^\/]*/) { st = substr($2, RSTART, RLENGTH); step[$1] = st
+                                 if (index(mon, " " $1 " ")) bad[st] = 1 }
+      END { bad[me] = 1; for (p in step) if (!(step[p] in bad)) print p }' | sort -n | paste -sd,)
+fi
+'''.replace("MARK", MONITOR_MARK)
+
 REMOTE = r'''
+: MARK
 ms=$1; pint=$2; gpu=$3
 trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM INT HUP
 h=$(hostname -s)
@@ -81,15 +99,13 @@ while :; do
       ps -ww -o pid=,rss=,times=,etimes=,args= -p "$pids" | sed "s/^ */S|$h|/"
     fi
   else
-    # the job's processes: every step except our monitor and SLURM's extern step, minus slurmstepd itself
-    pids=$(find "$jcg" -name cgroup.procs ! -path "*/$mystep/*" ! -path "*/step_extern/*" -exec cat {} + 2>/dev/null \
-           | sort -un | paste -sd,)
+    @JOB_PIDS@
     [ -n "$pids" ] && ps -ww -o pid=,rss=,times=,etimes=,args= -p "$pids" | awk '$5 != "slurmstepd:"' | sed "s/^ */C|$h|/"
   fi
   echo "E|$h|$EPOCHREALTIME"
   sleep "$pint"
 done
-'''
+'''.replace("MARK", MONITOR_MARK).replace("@JOB_PIDS@", JOB_PIDS_SH.strip().replace("\n", "\n    "))
 
 
 def fnum(s):

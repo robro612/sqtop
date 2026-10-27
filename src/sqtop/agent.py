@@ -11,6 +11,8 @@ import urllib.request
 
 from .core import (
     ANSI_RE,
+    JOB_PIDS_SH,
+    MONITOR_MARK,
     PDEATH,
     STEP_END_RE,
     STEP_NAME,
@@ -28,16 +30,16 @@ from .core import (
 
 # One-shot probe run inside each running job (srun --overlap, one task per node). Samples CPU over 1 s.
 #   T|h|<pid> <ticks>   U|h|<pid> <ticks>     per-process utime+stime before / after the 1 s sleep
-#   J|h|<t0>|<t1>|<cpu usec 0>|<cpu usec 1>|<mem.current>|<mem.max>|<anon>|<CLK_TCK>
+#   J|h|<t0>|<t1>|<cpu usec 0>|<cpu usec 1>|<mem.current>|<mem.max>|<anon>|<CLK_TCK>   (8 fields)
 #   S|h|<pid> <ppid> <rss KiB> <elapsed s> <args>
 #   G|h|<query-gpu csv>   P|h|<compute-apps csv>   L|h|<ss -ltnp line>
 REMOTE_ONCE = r"""
+: MARK
 gpu=$1
 h=$(hostname -s)
 cg=$(sed -n 's/^0:://p' /proc/self/cgroup); jcg=/sys/fs/cgroup${cg%%/step_*}
 mystep=$(sed -n 's|.*/\(step_[^/]*\)/.*|\1|p' /proc/self/cgroup)
-pids=$(find "$jcg" -name cgroup.procs ! -path "*/$mystep/*" ! -path "*/step_extern/*" -exec cat {} + 2>/dev/null \
-       | sort -un | paste -sd,)
+@JOB_PIDS@
 st() {
   [ -n "$pids" ] && awk -v k="$1" -v h="$h" '{l=$0; sub(/^.*\) /,"",l); split(l,f," "); p=FILENAME;
     gsub(/[^0-9]/,"",p); print k "|" h "|" p " " f[12]+f[13]}' $(tr ',' '\n' <<<"$pids" | sed 's|.*|/proc/&/stat|') 2>/dev/null
@@ -54,7 +56,7 @@ if [ "$gpu" = 1 ]; then
   nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory --format=csv,noheader,nounits 2>/dev/null | sed "s/^/P|$h|/"
 fi
 ss -Hltnp 2>/dev/null | sed "s/^/L|$h|/"
-"""
+""".replace("MARK", MONITOR_MARK).replace("@JOB_PIDS@", JOB_PIDS_SH.strip())
 
 
 BATCH_SHELL_RE = re.compile(r"^/bin/(ba)?sh /var/spool/slurm\S*/slurm_script")
@@ -218,7 +220,7 @@ def job_record(job: Job, info: dict, probe, prom: dict, a):
     cores = used = cache = lim = None
     for host, h in hosts.items():
         j = h["J"]
-        if not j or len(j) < 9:
+        if not j or len(j) < 8:
             continue
         t0, t1, c0, c1, cur, mx, anon = (fnum(x) for x in j[:7])
         if None not in (t0, t1, c0, c1) and t1 > t0:
@@ -235,7 +237,7 @@ def job_record(job: Job, info: dict, probe, prom: dict, a):
     # processes: merged when the command line is identical (dataloader workers, vLLM workers, ...)
     groups: dict[tuple, dict] = {}
     for host, h in hosts.items():
-        tck = fnum(h["J"][9]) if h["J"] and len(h["J"]) > 9 else 100.0
+        tck = (fnum(h["J"][7]) if h["J"] and len(h["J"]) > 7 else None) or 100.0
         dt = (fnum(h["J"][1]) - fnum(h["J"][0])) if h["J"] else 1.0
         gmem: dict[int, float] = {}
         for pl in h["P"]:

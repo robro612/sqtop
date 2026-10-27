@@ -151,32 +151,40 @@ def fit(t, w, style=None):
 
 
 TW = 79   # inner width of the device table, as in nvidia-smi / nvitop
+SUB = (30, 22, 25)   # its sub-columns: identity | state | usage (TW = sum + 2 dividers)
 
 
 B = "bright_black"
 
 
 class Frame:
-    """Device table plus separate GPU and job-CPU bar columns, each boxed, nvitop style."""
+    """Device table (three nvidia-smi-style sub-columns) plus separate GPU and job-CPU bar columns."""
 
     def __init__(self, width):
         rest = width - TW - 3
-        if rest >= 64:                  # room for both columns
+        if rest >= 64:                  # room for both bar columns
             self.gw = (rest - 1) * 11 // 20
             self.cw = rest - 1 - self.gw
         else:                           # GPU column only (CPU falls back to text in the table)
             self.gw, self.cw = (rest if rest >= 30 else 0), 0
 
     def border(self, l, fill, mid, r):
-        s = l + fill * TW
+        s = l + mid.join(fill * w for w in SUB)
         for w in (self.gw, self.cw):
             if w:
                 s += mid + fill * w
         return Text(s + r, style=B)
 
     def row(self, left, gpu=None, cpu=None):
+        """left: a (identity, state, usage) tuple of cells, or one Text spanning the whole table."""
         t = Text("│", style=B)
-        t.append_text(fit(left, TW))
+        if isinstance(left, tuple):
+            for i, (cell, w) in enumerate(zip(left, SUB)):
+                if i:
+                    t.append("│", style=B)
+                t.append_text(fit(cell if cell is not None else Text(""), w))
+        else:
+            t.append_text(fit(left, TW))
         for w, cell in ((self.gw, gpu), (self.cw, cpu)):
             if w:
                 t.append("│", style=B)
@@ -236,25 +244,43 @@ def left_style(left, limit):
     return ""
 
 
+def _num_or(v, fmt, na="N/A"):
+    return na if v is None else format(v, fmt)
+
+
+def gpu_fields(g):
+    """Fixed-width strings so the '/' in power and memory line up across rows."""
+    pw = f"{_num_or(g.power, '>4.0f')}W / {_num_or(g.power_limit, '>4.0f')}W" if g.power is not None else "N/A"
+    if g.mem_used is not None and g.mem_total:
+        mem = f"{g.mem_used / 1024:>5.1f}GiB / {g.mem_total / 1024:>5.1f}GiB"
+    else:
+        mem = "N/A"
+    temp = f"{g.temp:.0f}°C" if g.temp is not None else "N/A"
+    util = f"{g.util:.0f}%" if g.util is not None else "N/A"
+    return pw, mem, temp, util
+
+
 def render_devices(m: Monitor, width: int, compact: bool, sel_job: str | None):
     """Rows are jobs and their GPUs; columns are the device table, GPU bars, and the job's CPU/RAM bars.
-    A job's CPU/RAM sits on its first data row (first GPU, or a placeholder row for CPU-only jobs)."""
+    A job's CPU/RAM sits on its first data row (first GPU, or a placeholder row for CPU-only jobs).
+    Device-table cells use one grid (SUB) for every row: names left-aligned, numbers right-aligned."""
     jobs, streams, dead = m.snapshot()
     fr = Frame(width)
+    bold = "bold"
     lines = [fr.border("╒", "═", "╤", "╕")]
-    if not compact:
-        lines.append(fr.row(Text(f" {'JOB':<12} {'NAME':<19} {'NODE':<9} {'ELAPSED':>10} / {'LIMIT':<10} {'LEFT':>10}", style="bold"),
-                            Text(" GPU", style="bold"), Text(" Job CPU", style="bold")))
     if compact:
-        lines.append(fr.row(Text(f" {'GPU':>3}  {'Job':<20} {'Prf':>3} {'Temp':>5} "
-                                 f"{'Pwr:Usage/Cap':>14}  {'Memory-Usage':>19}  {'Util':>5}", style="bold"),
-                            Text(" memory / utilization", style="bold"),
-                            Text(" cores / RAM (vs. allocation)", style="bold")))
+        lines.append(fr.row((Text(f" {'GPU':>3}  Job", bold), Text(f"{'Memory-Usage':>21} ", bold),
+                             Text(f"{'Temp':>5} {'Pwr:Usage/Cap':>13} {'Util':>4} ", bold)),
+                            Text(" memory / utilization", bold), Text(" cores / RAM (vs. allocation)", bold)))
     else:
-        lines.append(fr.row(Text(f" {'GPU':>3}  {'Name':<24} {'Perf':>4}  {'Temp':>5}  {'Pwr:Usage/Cap':>15}", style="bold"),
-                            Text(" memory", style="bold"), Text(" cores (vs. allocation)", style="bold")))
-        lines.append(fr.row(Text(f" {'':>3}  {'':<24} {'Memory-Usage':>26}  {'GPU-Util':>17}", style="bold"),
-                            Text(" utilization", style="bold"), Text(" RAM (vs. limit, excl. cache)", style="bold")))
+        lines.append(fr.row((Text(f" {'JOB':<12} NAME", bold), Text(f" {'NODE':<9} {'LEFT':>10} ", bold),
+                             Text(f" {'ELAPSED':>10} / {'LIMIT':<10} ", bold)),
+                            Text(" GPU", bold), Text(" Job CPU", bold)))
+        lines.append(fr.row((Text(f" {'GPU':>3}  Name", bold), Text(f" {'Perf':<4}{'Temp':>16} ", bold),
+                             Text(f"{'Pwr:Usage/Cap':>24} ", bold)),
+                            Text(" memory", bold), Text(" cores (vs. allocation)", bold)))
+        lines.append(fr.row((None, Text(f"{'Memory-Usage':>21} ", bold), Text(f"{'GPU-Util':>24} ", bold)),
+                            Text(" utilization", bold), Text(" RAM (vs. limit, excl. cache)", bold)))
     lines.append(fr.border("╞", "═", "╪", "╡"))
     running = [j for j in jobs if j.state == "RUNNING"]
     if not running:
@@ -268,12 +294,13 @@ def render_devices(m: Monitor, width: int, compact: bool, sel_job: str | None):
         cpu_rows = cpu_ram_stack(fr.cw, job, st) if st and fr.cw else (None, None)  # full: stacked
         if not compact:
             el, left, lim = job.elapsed_now(), job.left_now(), parse_dur(job.limit)
-            jt = Text(" ")
-            jt.append(f"{job.display:<12}", style="bold reverse cyan" if job.jobid == sel_job else "bold cyan")
-            jt.append(f" {job.name[:19]:<19} {job.nodes[:9]:<9} ")
-            jt.append(f"{fmt_dur(el) if el is not None else job.elapsed:>10} / {job.limit[:10]:<10} ", style=B)
-            jt.append(f"{(fmt_dur(left) if left is not None else '-'):>10}", style=left_style(left, lim))
-            lines.append(fr.row(jt))
+            ident = Text(" ")
+            ident.append(f"{job.display:<12}", style="bold reverse cyan" if job.jobid == sel_job else "bold cyan")
+            ident.append(f" {job.name}")
+            state = Text(f" {job.nodes[:9]:<9} ")
+            state.append(f"{(fmt_dur(left) if left is not None else '-'):>10}", style=left_style(left, lim))
+            usage = Text(f" {fmt_dur(el) if el is not None else job.elapsed:>10} / {job.limit[:10]:<10} ", style=B)
+            lines.append(fr.row((ident, state, usage)))
             if st and not fr.cw:
                 cores, _, used, mlim, cache = st
                 lines.append(fr.row(Text(f"   CPU {cores or 0:.1f}/{job.cpus} cores   RAM {human_bytes(used)}/{human_bytes(mlim)}"
@@ -289,55 +316,55 @@ def render_devices(m: Monitor, width: int, compact: bool, sel_job: str | None):
             errors = list(s.errors)
             started = s.started
         if not job.has_gpu:
-            t = Text("   -  ")
-            t.append(f"{(job.display + ' ' + job.name)[:20] if compact else '(no GPUs)':<20}", style="cyan" if compact else B)
+            ident = Text(f" {'-':>3}  ")
+            ident.append(f"{job.display} {job.name}" if compact else "(no GPUs)", style="cyan" if compact else B)
             if compact:
-                lines.append(fr.row(t, None, cpu_cell))
+                lines.append(fr.row((ident, None, None), None, cpu_cell))
             else:
-                lines += [fr.row(t, None, cpu_rows[0]), fr.row(Text(""), None, cpu_rows[1])]
+                lines += [fr.row((ident, None, None), None, cpu_rows[0]), fr.row((None, None, None), None, cpu_rows[1])]
         elif not gpus:
             msg = Text("   waiting for first sample…" if time.time() - started < 20 else "   no GPU data", style="yellow")
             if compact:
-                lines.append(fr.row(msg, None, cpu_cell))
+                lines.append(fr.row((msg, None, None), None, cpu_cell))
             else:
-                lines += [fr.row(msg, None, cpu_rows[0]), fr.row(Text(""), None, cpu_rows[1])]
+                lines += [fr.row((msg, None, None), None, cpu_rows[0]), fr.row((None, None, None), None, cpu_rows[1])]
         multi = len({g.host for g in gpus}) > 1
         now = time.time()
         for gi, g in enumerate(gpus):
             stale = now - g.t > STALE_S
             label = f"{g.host[-4:]}:{g.index}" if multi else f"{g.index}"
-            name = f"{job.display} {job.name}" if compact else g.name
-            pw = f"{g.power:.0f}W / {g.power_limit:.0f}W" if g.power is not None and g.power_limit else "N/A"
-            mem = f"{g.mem_used / 1024:.1f}GiB / {g.mem_total / 1024:.1f}GiB" if g.mem_used is not None and g.mem_total else "N/A"
-            temp = f"{g.temp:.0f}°C" if g.temp is not None else "N/A"
+            pw, mem, temp, uval = gpu_fields(g)
             mfrac = g.mem_used / g.mem_total if g.mem_used is not None and g.mem_total else None
             mval = f"{100 * mfrac:.1f}%" if mfrac is not None else "N/A"
-            uval = f"{g.util:.0f}%" if g.util is not None else "N/A"
-            ustr = Text(f"{uval:>5}", style=util_style(g.util))
+            ustyle = util_style(g.util)
             if compact:
-                t = Text(f" {label:>3}  ")
-                t.append(f"{name[:20]:<20}", style="cyan")
-                t.append(f" {g.pstate:>3} {temp:>5} {pw:>14}  {mem:>19}  ")
-                t.append_text(ustr)
+                ident = Text(f" {label:>3}  ")
+                ident.append(f"{job.display} {job.name}", style="cyan")
+                usage = Text(f"{temp:>5} {pw:>13} ")
+                usage.append(f"{uval:>4}", style=ustyle)
+                usage.append(" ")
+                cells = (ident, Text(f"{mem:>21} "), usage)
                 gpu_cell = two_bars(fr.gw, "MEM", mfrac, mval, "magenta", "UTL", (g.util or 0) / 100, uval,
-                                    util_style(g.util)) if fr.gw else None
+                                    ustyle) if fr.gw else None
                 if stale:
-                    t.stylize("bright_black")
+                    cells = tuple(c.copy() for c in cells)
+                    for c in cells:
+                        c.stylize("bright_black")
                     gpu_cell = Text(f" stale: no sample for {now - g.t:.0f}s", style="yellow")
-                lines.append(fr.row(t, gpu_cell, cpu_cell if gi == 0 else None))
+                lines.append(fr.row(cells, gpu_cell, cpu_cell if gi == 0 else None))
                 continue
             # full: two rows per GPU, like nvidia-smi / nvitop; bars stacked MEM over UTL, CPU over RAM
-            t1 = Text(f" {label:>3}  {g.name[:24]:<24} {g.pstate:>4}  {temp:>5}  {pw:>15}")
-            t2 = Text(f" {'':>3}  {'':<24} {mem:>26}  {'':>12}")
-            t2.append_text(ustr)
+            row1 = (Text(f" {label:>3}  {g.name}"), Text(f" {g.pstate:<4}{temp:>16} "), Text(f"{pw:>24} "))
+            util_cell = Text(f"{uval:>24}", style=ustyle) + Text(" ")
+            row2 = (None, Text(f"{mem:>21} "), util_cell)
             g1 = Text(" ") + nv_bar("MEM", mfrac, fr.gw - 2, "magenta", mval) if fr.gw else None
-            g2 = Text(" ") + nv_bar("UTL", (g.util or 0) / 100, fr.gw - 2, util_style(g.util), uval) if fr.gw else None
+            g2 = Text(" ") + nv_bar("UTL", (g.util or 0) / 100, fr.gw - 2, ustyle, uval) if fr.gw else None
             if stale:
-                t1.stylize("bright_black")
-                t2.stylize("bright_black")
+                for c in (*row1, *row2[1:]):
+                    c.stylize("bright_black")
                 g1, g2 = Text(f" stale: no sample for {now - g.t:.0f}s", style="yellow"), None
             c1, c2 = cpu_rows if gi == 0 else (None, None)
-            lines += [fr.row(t1, g1, c1), fr.row(t2, g2, c2)]
+            lines += [fr.row(row1, g1, c1), fr.row(row2, g2, c2)]
         for e in errors:
             lines.append(fr.row(Text(f"   ! {e}", style="red")))
     lines.append(fr.border("╘", "═", "╧", "╛"))
