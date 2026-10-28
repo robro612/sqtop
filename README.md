@@ -119,6 +119,22 @@ sqtop --json --window 1h | jq '.jobs[] | select(any(.procs[]?; .cmd | test("vllm
 - `--json` uses the same pieces as a one-shot: `squeue` + `scontrol`, a few Prometheus window
   queries, and one short `srun --overlap` per job, all in parallel.
 
+Load on the Slurm controller:
+- Every `squeue` is an RPC to `slurmctld`, which answers it while holding locks on its job
+  table. Frequent polling, especially from many users at once (`watch squeue`), slows
+  scheduling for the whole cluster. So `squeue` is sqtop's only recurring controller call: one
+  call for your user only, every 30 s by default. Live metrics never come from `squeue`, so
+  there is no reason to lower `--squeue-s`.
+- sqtop re-polls early only when a job's stream closes (the job probably ended) or when you
+  press `r`.
+- `srun --overlap` creates a step inside the job's existing allocation: it requests no new
+  resources and never waits in the queue. The controller is involved once, when the step
+  starts. After that, `srun` streams directly from the node's `slurmstepd`, so 1 s GPU samples
+  put no load on `slurmctld`.
+- `scontrol show job` runs only on demand (the log and details views) and once per job in
+  `--json`. Each `--json` call also starts one short step per job, so agents should not call it
+  in a tight loop.
+
 Safety:
 - **Read-only.** sqtop never signals processes or cancels jobs.
 - Stopping a monitoring step (SIGTERM to its `srun`) cancels **only that step**, never the job.
