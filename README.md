@@ -44,6 +44,7 @@ Keys (press `h` in the app for the full list):
 | Key | Action |
 |---|---|
 | `↑` `↓` `Home` `End` `PgUp` `PgDn`, wheel, click | select a row (a job / process) |
+| double-click a cell | copy its full text, e.g. a whole array ID or command line (needs a terminal with OSC 52 clipboard support; in tmux, `set -g set-clipboard on`) |
 | `Enter` | per-process metrics: charts for the process plus job details |
 | `e` | process environment, fetched from the node on demand |
 | `l` | tail the job's log (StdOut/StdErr; `Tab` switches) |

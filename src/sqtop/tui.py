@@ -23,6 +23,7 @@ from .render import (
     ProcRow,
     braille,
     bucketize,
+    cell_text_at,
     fit,
     mem_style,
     proc_rows,
@@ -53,6 +54,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   ↑ ↓      select process                           Esc     clear selection
   Home End first / last process                     PgUp PgDn  page through processes
   ← → ^ $  scroll COMMAND column (also ^A ^E)       wheel   scroll, click selects
+  double-click a cell: copy its full text (via your terminal's OSC 52 clipboard support)
 
   Enter    process metrics (charts for that process + job details)
   e        process environment (fetched from the node on demand)
@@ -97,7 +99,12 @@ class ProcPanel(Lines):
         self.screen.move_cursor(-3)
 
     def on_click(self, event):
-        self.screen.click_row(event.y - 4)
+        # the first click's selection can show/hide the host panel and shift this one, so the
+        # double-click's y is stale: copy from the row the first click selected
+        if event.chain == 2:
+            self.screen.copy_cell(event.x)
+        else:
+            self.screen.click_row(event.y - 4)
 
 
 class MainScreen(Screen):
@@ -232,6 +239,14 @@ class MainScreen(Screen):
         c = (0 if d > 0 else len(self.rows) - 1) if c is None else max(0, min(len(self.rows) - 1, c + d))
         self.sel = self.rows[c].key
         self.tick()
+
+    def copy_cell(self, x):
+        r = self.sel_row()
+        if r:
+            text = cell_text_at(self.rows, r, x)
+            if text:
+                self.app.copy_to_clipboard(text)
+                self.note(f"copied: {text[:80]}" + ("…" if len(text) > 80 else ""))
 
     def click_row(self, i):
         i += self.row_off

@@ -317,7 +317,11 @@ def render_devices(m: Monitor, width: int, compact: bool, sel_job: str | None):
             started = s.started
         if not job.has_gpu:
             ident = Text(f" {'-':>3}  ")
-            ident.append(f"{job.display} {job.name}" if compact else "(no GPUs)", style="cyan" if compact else B)
+            if compact:
+                ident.append(job.display, style="bold reverse cyan" if job.jobid == sel_job else "cyan")
+                ident.append(f" {job.name}", style="cyan")
+            else:
+                ident.append("(no GPUs)", style=B)
             if compact:
                 lines.append(fr.row((ident, None, None), None, cpu_cell))
             else:
@@ -339,7 +343,8 @@ def render_devices(m: Monitor, width: int, compact: bool, sel_job: str | None):
             ustyle = util_style(g.util)
             if compact:
                 ident = Text(f" {label:>3}  ")
-                ident.append(f"{job.display} {job.name}", style="cyan")
+                ident.append(job.display, style="bold reverse cyan" if job.jobid == sel_job else "cyan")
+                ident.append(f" {job.name}", style="cyan")
                 usage = Text(f"{temp:>5} {pw:>13} ")
                 usage.append(f"{uval:>4}", style=ustyle)
                 usage.append(" ")
@@ -524,7 +529,7 @@ class ProcRow:
 
 # key, header, width, default descending?, left-aligned?
 COLS = [
-    ("job", "JOB", 12, False, True),
+    ("job", "JOB", 18, False, True),    # fits pending array ranges, e.g. 1234567_[10-99%4]
     ("name", "NAME", 16, False, True),
     ("gres", "GRES", 9, False, True),
     ("time", "TIME", 10, True, False),
@@ -629,6 +634,16 @@ def _cell(r, key):
     if key == "mem":
         return (f"{r.mem:.1f}" if r.mem is not None else "-"), None
     return "-", None
+
+
+def cell_text_at(rows, r, x):
+    """Full, untruncated text of the process-table cell at column x of row r (for copying)."""
+    pos = 2   # "│" + leading space
+    for key, _, w, _, _ in visible_cols(rows):
+        if x < pos + w:
+            return (r.node or "-") if key == "node" else _cell(r, key)[0] if x >= pos else None
+        pos += w + 1
+    return r.reason if r.pending else r.args
 
 
 def render_procs(rows, width, height, cursor, offset, hscroll, sort_key, sort_rev, user):
