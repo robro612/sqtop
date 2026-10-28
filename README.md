@@ -6,19 +6,8 @@ scripts.
 
 `squ` shows which jobs you have; `sqtop` shows what they are doing.
 
-```
-╒═══ device table ══════════════════════════╤═ GPU ════════════════════════════╤═ Job CPU ═════════════════════╕
-│ 1139833_8    small-e5   rack4n01  7:57:12 … │                                  │                               │
-│   0  L40S                P0   67°C  335W/350W │ MEM: █████████████ 38.3%          │ CPU: ███▉ 1.5/8 cores          │
-│                     17.2GiB / 45.0GiB   85% │ UTL: ██████████████████████▌ 85% │ RAM: ████▉ 4.5G/20.0G          │
-╘═════════════════════════════════════════════╧══════════════════════════════════╧═══════════════════════════════╛
-[ CPU: █████▉ 19.0%          1.5/8 cores   ELAPSED: 7:47:08 ]  ( Load Average: 11.42 11.72 11.91 / 256 )
-[ MEM: ██████▊ 22.7%            USED: 4.5GiB of 20.0GiB ]      [ CACHE: ████████ 15.4GiB ]
-  GPU UTL 89%  5m avg 88%  p10 80%   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿ … (braille history charts)
- JOB▲         NAME          GRES      TIME NODE      GPU-MEM %SM %GMBW  %CPU %MEM COMMAND / REASON
- 1139833_8    small-e5      l40s:1 8:03:12 rack4n01  17.2GiB  89    70  93.6 16.2 python -m leaf_scaling.train …
- 1142174      lr-400m-2e-4  l40s:1       - -               -   -     -     -    - (Priority)
-```
+<img width="3004" height="1796" alt="image" src="https://github.com/user-attachments/assets/6f947409-9e9b-470c-8c5b-090293e1115c" />
+
 
 ## Install
 
