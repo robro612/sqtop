@@ -177,7 +177,7 @@ def prom_url():
 @dataclass
 class Job:
     jobid: str      # raw id (%A); what srun --jobid and Prometheus use
-    display: str    # %i, e.g. 1139833_11
+    display: str    # %i, e.g. 123456_11
     state: str
     nnodes: int
     nodes: str

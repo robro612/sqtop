@@ -4,15 +4,27 @@ An nvitop-style live view of **your SLURM jobs**: their GPUs, CPU/RAM against th
 processes, logs, and history. It also has a one-shot JSON mode (`sqtop --json`) for agents and
 scripts.
 
-`squ` shows which jobs you have; `sqtop` shows what they are doing.
+`squeue` shows which jobs you have; `sqtop` shows what they are doing.
 
 <img width="3004" height="1796" alt="image" src="https://github.com/user-attachments/assets/6f947409-9e9b-470c-8c5b-090293e1115c" />
 
 
+## Requirements
+
+- SLURM 20.11+ (for `srun --overlap`), with jobs placed in **cgroup v2** (`proctrack/cgroup` +
+  `task/cgroup`; sqtop reads the job's `.../job_N/step_*` cgroup for CPU/RAM and processes).
+- NVIDIA GPUs with `nvidia-smi` on the compute nodes. CPU-only jobs still show CPU/RAM and processes.
+- `bash` 5+ and `setpriv` (util-linux) on the nodes / login node; Python 3.10+.
+- Optional, for history before sqtop started and `--json` window stats: Prometheus scraping the
+  [jobstats](https://github.com/PrincetonUniversity/jobstats) GPU exporter (`nvidia_gpu_duty_cycle`).
+  Point sqtop at it with `$SQTOP_PROM_URL`, or it reads `PROM_SERVER` from
+  `/usr/local/jobstats/config.py`.
+
 ## Install
 
 ```bash
-uv tool install --editable /exp/rjha/sqtop     # puts `sqtop` in ~/.local/bin
+uv tool install git+https://github.com/robro612/sqtop   # puts `sqtop` in ~/.local/bin
+uv tool install --editable .                         # or, from a clone
 ```
 
 or, from the repo, `uv run sqtop`. The only dependency is `textual`.
@@ -53,7 +65,7 @@ Conventions:
 ## Agent / script mode
 
 ```bash
-sqtop --json [--window 30m] [--jobs 1139833,1142173] [--log-lines 5] [--max-procs 15] [--no-procs] [--pretty]
+sqtop --json [--window 30m] [--jobs 123456,123457_2] [--log-lines 5] [--max-procs 15] [--no-procs] [--pretty]
 ```
 
 This prints **one JSON document** and exits. A call takes about 3 s and leaves nothing running.
@@ -149,3 +161,7 @@ Known gaps:
 - There is no per-process history from before sqtop started (Prometheus has none).
 - There is no process tree view.
 - Multi-node jobs are handled (one stream task per node, rows labelled by host) but untested.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

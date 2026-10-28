@@ -499,7 +499,7 @@ class ProcRow:
     jobid: str
     display: str
     name: str
-    gres: str            # as in `squ`: gres/gpu: prefix stripped, e.g. l40s:1
+    gres: str            # gres/gpu: prefix stripped, e.g. l40s:1
     node: str
     state: str
     reason: str

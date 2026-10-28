@@ -59,7 +59,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   l        tail the selected job's log (StdOut/StdErr; Tab switches)
   + -      zoom charts (seconds per braille dot)
 
-  The bottom table is one row per job process (like squ, plus live metrics);
+  The bottom table is one row per job process (like squeue, plus live metrics);
   pending jobs are listed last with their reason. TIME is the job's elapsed time.
   Charts show the selected row's job, or all jobs averaged when nothing is selected.
   History before sqtop started comes from Prometheus (1-minute resolution).

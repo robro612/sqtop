@@ -3,6 +3,8 @@ name = "sqtop"
 version = "0.1.0"
 description = "nvitop-style live view of your SLURM jobs (GPU, CPU, processes, logs), plus a JSON mode for agents"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = ["textual>=8,<9"]
 
