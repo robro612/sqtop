@@ -14,6 +14,7 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets import Static
 
+from .cluster import ClusterMonitor, render_detail, render_summary
 from .core import PDEATH, RES_STEPS, STEP_NAME, Job, Monitor, human_bytes, job_mem_limit, read_log_lines, scontrol_job, short_args
 from .render import (
     COLS,
@@ -57,6 +58,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   double-click a cell: copy its full text (via your terminal's OSC 52 clipboard support)
 
   Enter    process metrics (charts for that process + job details)
+  g        cluster GPUs: free / queued by GPU type or by node (Enter on a type: its nodes + queue)
   e        process environment (fetched from the node on demand)
   l        tail the selected job's log (StdOut/StdErr; Tab switches)
   + -      zoom charts (seconds per braille dot)
@@ -210,7 +212,8 @@ class MainScreen(Screen):
             st.append(" sort by: j job  n name  r gres  t time  d node  g gpu-mem  s %sm  b %gmbw  c %cpu  m %mem"
                       "  i gpu  p pid", style="yellow")
         else:
-            st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · e env · l log · o sort · a/f/c mode · +/- zoom",
+            st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · e env · l log · g gpus · o sort · a/f/c mode"
+                      " · +/- zoom",
                       style=B)
         age = time.time() - self.m.last_squeue if self.m.last_squeue else 0
         right = f"gpu {self.m.a.gpu_ms}ms · procs {self.m.a.proc_s:g}s · squeue {self.m.a.squeue_s:g}s ({age:.0f}s ago) "
@@ -301,6 +304,8 @@ class MainScreen(Screen):
         elif ch == "$" or k == "ctrl+e":
             r = self.sel_row() or (self.rows[0] if self.rows else None)
             self.hscroll = max(0, len(short_args(r.args)) - 30) if r else 0
+        elif ch == "g":
+            self.app.push_screen(ClusterScreen(self.app.cm))
         elif ch == "o":
             self.await_sort = True
             self.tick()
@@ -586,6 +591,171 @@ class MetricsScreen(Screen):
         event.stop()
 
 
+class ClusterPanel(Lines):
+    def on_mouse_scroll_down(self, event):
+        self.screen.move(+3)
+
+    def on_mouse_scroll_up(self, event):
+        self.screen.move(-3)
+
+    def on_click(self, event):
+        self.screen.click_row(event.y, event.chain == 2)
+
+
+def poll_status(cm, keys, w):
+    if cm.err:
+        return Text(f" sinfo/squeue error: {cm.err}", style="red")
+    st = Text(f" {keys}", style=B)
+    right = f"sinfo+squeue every {cm.interval:g}s while open " + (f"({time.time() - cm.last:.0f}s ago) " if cm.last else "(polling…) ")
+    st.append(" " * max(1, w - len(st.plain) - len(right)))
+    st.append(right, style=B)
+    return st
+
+
+class ClusterScreen(Screen):
+    """Free / queued GPUs across the cluster, one row per GPU type (n: per node)."""
+
+    def __init__(self, cm: ClusterMonitor):
+        super().__init__()
+        self.cm = cm
+        self.node_mode = False
+        self.sel = None
+        self.keys: list[str] = []
+        self.n_head = 1
+        self.row_off = 0
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="header")
+        yield ClusterPanel(self.lines, id="procs")
+        yield Static(id="status")
+
+    def on_mount(self):
+        self.cm.activate()
+        self.set_interval(1.0, self.tick)
+        self.tick()
+
+    def on_unmount(self):
+        self.cm.deactivate()
+
+    def tick(self):
+        h = Text(" sqtop gpus ", style="bold black on green")
+        h.append(f"  {time.strftime('%a %b %d %H:%M:%S')}   ", style="bold")
+        snap = self.cm.snap
+        if snap:
+            groups = [g for g in snap.groups if not g.pseudo]
+            free, total = sum(g.free for g in groups), sum(g.total for g in groups)
+            queued = sum(g.pend_gpus.get("queued", 0) for g in snap.groups)
+            h.append(f"{free} of {total} GPUs free · {queued} GPUs queued", style="")
+            h.append(f"   by {'node' if self.node_mode else 'GPU type'}", style=B)
+        self.query_one("#header").update(h)
+        self.query_one("#status").update(poll_status(
+            self.cm, "Esc/q back · ↑↓ select · Enter nodes + queue for that type · n by node / by type · r refresh",
+            self.size.width or 120))
+        self.query_one("#procs").refresh()
+
+    def lines(self, w, h):
+        snap = self.cm.snap
+        if snap is None:
+            return [Text(" polling sinfo + squeue…", style="yellow")]
+        head, rows, foot = render_summary(snap, self.node_mode)
+        self.keys = [k for k, _ in rows]
+        self.n_head = len(head)
+        if self.sel not in self.keys:
+            self.sel = None
+        body_h = max(1, h - len(head) - len(foot))
+        c = self.keys.index(self.sel) if self.sel is not None else None
+        if c is not None:
+            self.row_off = min(max(self.row_off, c - body_h + 1), c)
+        self.row_off = max(0, min(self.row_off, len(rows) - body_h))
+        out = list(head)
+        for i, (k, line) in enumerate(rows[self.row_off:self.row_off + body_h]):
+            if k == self.sel:
+                line = line.copy()
+                line.stylize("reverse")
+            out.append(line)
+        return [fit(x, w) for x in out + foot]
+
+    def move(self, d):
+        if not self.keys:
+            return
+        c = self.keys.index(self.sel) if self.sel in self.keys else None
+        c = (0 if d > 0 else len(self.keys) - 1) if c is None else max(0, min(len(self.keys) - 1, c + d))
+        self.sel = self.keys[c]
+        self.query_one("#procs").refresh()
+
+    def click_row(self, y, double):
+        i = y - self.n_head + self.row_off
+        if 0 <= i < len(self.keys):
+            self.sel = self.keys[i]
+            self.query_one("#procs").refresh()
+            if double:
+                self.open()
+
+    def open(self):
+        snap = self.cm.snap
+        if snap is None or self.sel is None:
+            return
+        name = snap.nodes[self.sel].group if self.node_mode and self.sel in snap.nodes else self.sel
+        self.app.push_screen(GroupScreen(self.cm, name))
+
+    def on_key(self, event):
+        k, ch = event.key, event.character
+        if k in ("escape", "q") or ch == "g":
+            self.app.pop_screen()
+        elif k == "down":
+            self.move(+1)
+        elif k == "up":
+            self.move(-1)
+        elif k == "pagedown":
+            self.move(+10)
+        elif k == "pageup":
+            self.move(-10)
+        elif k == "home":
+            self.move(-len(self.keys))
+        elif k == "end":
+            self.move(len(self.keys))
+        elif k == "enter":
+            self.open()
+        elif ch == "n":
+            self.node_mode = not self.node_mode
+            self.sel, self.row_off = None, 0
+            self.tick()
+        elif k in ("r", "f5"):
+            self.cm.kick.set()
+        else:
+            return
+        event.stop()
+
+
+class GroupScreen(TextScreen):
+    """One GPU type: each node's state and running jobs, then its pending jobs."""
+
+    def __init__(self, cm: ClusterMonitor, name: str):
+        super().__init__()
+        self.cm, self.gname = cm, name
+        self.drawn = (None, 0)
+
+    def on_mount(self):
+        super().on_mount()
+        self.set_interval(1.0, self.tick)
+        self.tick()
+
+    def tick(self):
+        snap, w = self.cm.snap, self.size.width or 120
+        self.query_one("#header").update(Text(f" {self.gname}: nodes + queue ", style="bold reverse green"))
+        self.query_one("#status").update(poll_status(self.cm, "Esc/q back · ↑↓ PgUp PgDn scroll · r refresh", w))
+        if snap is None or self.drawn == (snap.t, w):
+            return
+        self.drawn = (snap.t, w)
+        self.query_one("#content").update(Group(*[fit(x, w - 2) for x in render_detail(snap, self.gname)]))
+
+    def extra_key(self, event):
+        if event.key in ("r", "f5"):
+            self.cm.kick.set()
+            return True
+        return False
+
+
 class SqTop(App):
     CSS = CSS
     ENABLE_COMMAND_PALETTE = False
@@ -594,6 +764,7 @@ class SqTop(App):
     def __init__(self, m: Monitor):
         super().__init__(ansi_color=True)
         self.m = m
+        self.cm = ClusterMonitor(m.a.cluster_s, m.a.user)
 
     def on_mount(self):
         import asyncio

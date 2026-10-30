@@ -38,6 +38,9 @@ async def drive(m, size, out):
             ("6_compact_sorted", ["escape", "o", "G", "c"], 1),
             ("7_help", ["h"], 0.5),
             ("8_zoomed", ["x", "f", "-", "-", "-"], 1),
+            ("9_gpus", ["g"], 4),
+            ("10_gpus_nodes", ["n", "down"], 0.5),
+            ("11_gpu_type", ["n", "down", "down", "enter"], 1),
         ]
         for name, keys, wait in steps:
             for k in keys:
@@ -57,7 +60,7 @@ def main():
     w, h = map(int, a.size.split("x"))
     os.makedirs(a.out, exist_ok=True)
 
-    args = argparse.Namespace(gpu_ms=1000, proc_s=2.0, squeue_s=30.0, user=os.environ["USER"], no_history=False,
+    args = argparse.Namespace(gpu_ms=1000, proc_s=2.0, squeue_s=30.0, cluster_s=60.0, user=os.environ["USER"], no_history=False,
                               once=False, json=True, window=parse_window("30m"), jobs=None, log_lines=3, max_procs=15,
                               no_procs=False, pretty=False)
     t = time.time()

@@ -4,7 +4,8 @@ An nvitop-style live view of **your SLURM jobs**: their GPUs, CPU/RAM against th
 processes, logs, and history. It also has a one-shot JSON mode (`sqtop --json`) for agents and
 scripts.
 
-`squeue` shows which jobs you have; `sqtop` shows what they are doing.
+`squeue` shows which jobs you have; `sqtop` shows what they are doing. Press `g` (or run
+`sqtop --gpus`) for the cluster side: free GPUs by type or node, and the queue for each type.
 
 <img width="3004" height="1796" alt="image" src="https://github.com/user-attachments/assets/6f947409-9e9b-470c-8c5b-090293e1115c" />
 
@@ -37,6 +38,9 @@ sqtop --once               # print one snapshot and exit
 sqtop --squeue-s 10        # poll squeue every 10 s (default 30)
 sqtop --gpu-ms 500         # sample GPUs every 0.5 s (default 1 s)
 sqtop --no-history         # skip the Prometheus backfill
+sqtop --gpus               # print free / queued GPUs by type and exit
+sqtop --gpus a100-80g      # one type's nodes (state, running jobs, time left) and pending jobs
+sqtop --gpus --json        # the same as JSON (add a TYPE for its nodes and queue)
 ```
 
 Keys (press `h` in the app for the full list):
@@ -52,8 +56,21 @@ Keys (press `h` in the app for the full list):
 | `a` `f` `c` | display mode: auto / full / compact |
 | `+` `-` | zoom charts (seconds per braille dot) |
 | `←` `→` `^` `$` | scroll the command column |
+| `g` | cluster GPUs: one row per GPU type (`n`: per node); `Enter` on a type shows its nodes and pending jobs |
 | `r` / `F5` | re-poll squeue now |
 | `q` / `Ctrl-C` | quit |
+
+Cluster GPU view (`g`, `--gpus`):
+- FREE counts unallocated GPUs on nodes that are up and accepting jobs. GPUs on down or drained
+  nodes are `off`. Free GPUs on a node with no free CPUs or memory are `stranded`.
+- A type whose nodes carry different `NNgb` features is split by size, e.g. `a100-80g` and
+  `a100-40g`. Pending jobs go to the group matching their `--constraint`. Jobs with no size
+  constraint are listed once under `a100-any` and are not counted in both groups.
+- Pending GPUs are split into QUEUED (Priority / Resources), BLOCKED (QOS, association and array
+  limits) and HELD (dependencies, holds, begin time). A pending array counts all of its tasks.
+- END≤1h / ≤4h count allocated GPUs whose jobs reach their time limit within that window. This is
+  an upper bound on how soon GPUs free up, since jobs may end early. NEXT START is Slurm's earliest
+  start estimate for a queued job of that type.
 
 Conventions:
 - GPU utilization is red below 30%, yellow below 70%, green above. This is the reverse of
@@ -126,6 +143,8 @@ Load on the Slurm controller:
   scheduling for the whole cluster. So `squeue` is sqtop's only recurring controller call: one
   call for your user only, every 30 s by default. Live metrics never come from `squeue`, so
   there is no reason to lower `--squeue-s`.
+- The cluster GPU view adds one `sinfo -N` and one all-users `squeue` per poll. It polls only
+  while that view is open, every `--cluster-s` (default 60 s), so it adds no load otherwise.
 - sqtop re-polls early only when a job's stream closes (the job probably ended) or when you
   press `r`.
 - `srun --overlap` creates a step inside the job's existing allocation: it requests no new
@@ -165,6 +184,7 @@ Cost, measured with 6 jobs over 60 s:
 | `src/sqtop/render.py` | device table, host panel, braille charts, jobs & processes table |
 | `src/sqtop/tui.py` | Textual app and screens |
 | `src/sqtop/agent.py` | `--json` mode |
+| `src/sqtop/cluster.py` | cluster GPU view (`g`, `--gpus`): sinfo/squeue parsing, grouping, its tables |
 | `src/sqtop/cli.py` | argument parsing, `--once`, entry point |
 
 ## Development
