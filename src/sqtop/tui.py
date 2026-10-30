@@ -642,9 +642,8 @@ class ClusterScreen(Screen):
         h.append(f"  {time.strftime('%a %b %d %H:%M:%S')}   ", style="bold")
         snap = self.cm.snap
         if snap:
-            groups = [g for g in snap.groups if not g.pseudo]
-            free, total = sum(g.free for g in groups), sum(g.total for g in groups)
-            queued = sum(g.pend_gpus.get("queued", 0) for g in snap.groups)
+            free, total = sum(g.free for g in snap.groups), sum(g.total for g in snap.groups)
+            queued = sum(j.gpus * j.tasks for j in snap.pending() if j.klass == "queued")
             h.append(f"{free} of {total} GPUs free · {queued} GPUs queued", style="")
             h.append(f"   by {'node' if self.node_mode else 'GPU type'}", style=B)
         self.query_one("#header").update(h)

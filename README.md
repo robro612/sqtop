@@ -64,8 +64,9 @@ Cluster GPU view (`g`, `--gpus`):
 - FREE counts unallocated GPUs on nodes that are up and accepting jobs. GPUs on down or drained
   nodes are `off`. Free GPUs on a node with no free CPUs or memory are `stranded`.
 - A type whose nodes carry different `NNgb` features is split by size, e.g. `a100-80g` and
-  `a100-40g`. Pending jobs go to the group matching their `--constraint`. Jobs with no size
-  constraint are listed once under `a100-any` and are not counted in both groups.
+  `a100-40g`. These are node features, not gres types. Pending jobs go to the group matching their
+  `--constraint`. Jobs with no size constraint can run on either, so they are listed (and
+  counted) in both, marked `any a100`.
 - Pending GPUs are split into QUEUED (Priority / Resources), BLOCKED (QOS, association and array
   limits) and HELD (dependencies, holds, begin time). A pending array counts all of its tasks.
 - END≤1h / ≤4h count allocated GPUs whose jobs reach their time limit within that window. This is

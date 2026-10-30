@@ -116,6 +116,7 @@ class CJob:
     partition: str
     submit_t: float | None
     name: str
+    fits: str = ""         # set when the job fits several groups, e.g. 'any a100' (no size constraint)
 
     @property
     def gpn(self):
@@ -158,7 +159,6 @@ class Node:
 class Group:
     base: str
     mem: int | None = None
-    pseudo: bool = False   # pending jobs that fit several groups (e.g. a100 with no size constraint)
     nodes: list = field(default_factory=list)
     pending: list = field(default_factory=list)
     total: int = 0
@@ -177,17 +177,15 @@ class Group:
 
     @property
     def name(self):
-        if self.pseudo:
-            return f"{self.base}-any" if self.base else "any-gpu"
         return f"{self.base}-{self.mem}g" if self.mem else self.base
 
     @property
     def vram(self):
-        return "" if self.pseudo else f"{self.mem}G" if self.mem else VRAM.get(self.base, "")
+        return f"{self.mem}G" if self.mem else VRAM.get(self.base, "")
 
     def sort_key(self):
         i = ORDER.index(self.base) if self.base in ORDER else len(ORDER)
-        return (not self.base, i, self.base, self.pseudo, -(self.mem or 0))
+        return (i, self.base, -(self.mem or 0))
 
 
 @dataclass
@@ -200,11 +198,9 @@ class Snapshot:
     def group(self, name):
         return next((g for g in self.groups if g.name == name), None)
 
-    def group_nodes(self, g):
-        """A group's nodes; for a pseudo group, every node of its base type."""
-        if not g.pseudo:
-            return g.nodes
-        return [n for n in self.nodes.values() if not g.base or n.base == g.base]
+    def pending(self):
+        """Each pending job once (a job that fits several groups is listed in each)."""
+        return list({id(j): j for g in self.groups for j in g.pending}.values())
 
 
 def parse_nodes(out):
@@ -263,8 +259,8 @@ def build(nodes, jobs, user, now=None):
     split = {t for t, s in mems.items() if len(s) > 1}
     groups = {}
 
-    def grp(base, mem=None, pseudo=False):
-        return groups.setdefault((base, mem, pseudo), Group(base, mem, pseudo))
+    def grp(base, mem=None):
+        return groups.setdefault((base, mem), Group(base, mem))
 
     for n in nodes.values():
         g = grp(n.base, n.mem if n.base in split else None)
@@ -276,12 +272,18 @@ def build(nodes, jobs, user, now=None):
                 if h in nodes:
                     nodes[h].jobs.append(j)
             continue
-        if j.base in split:
+        if not j.base:   # untyped request (gpu:N): can run on any type
+            targets = [k for k in groups if k[0]]
+            j.fits = "any type"
+        elif j.base in split:
             want = {int(x) for x in MEM_FEAT_RE.findall(j.features.lower())} & mems[j.base]
-            g = grp(j.base, want.pop()) if len(want) == 1 else grp(j.base, pseudo=True)
+            targets = [(j.base, m) for m in sorted(want or mems[j.base], key=lambda m: -(m or 0))]
+            if len(targets) > 1:
+                j.fits = f"any {j.base}"
         else:
-            g = grp(j.base, pseudo=not j.base)
-        g.pending.append(j)
+            targets = [(j.base, None)]
+        for k in targets:
+            grp(*k).pending.append(j)
 
     for g in groups.values():
         for n in g.nodes:
@@ -357,10 +359,10 @@ class ClusterMonitor:
 
 # ---- rendering ----------------------------------------------------------------------------------
 BAR = 16
-LEFT_W = 11 + 5 + 2 + 9 + 2 + BAR + 2 + 5 + 2 + 5 + 2   # width of the availability half of a summary row
 LEGEND = ("QUEUED / BLOCKED / HELD: pending GPUs waiting on priority or resources / held by QOS or other limits / "
           "dependencies or holds.  END≤1h ≤4h: allocated GPUs whose jobs reach their time limit within 1h / 4h "
-          "(they may end sooner).  CPU/G MEM/G: free CPUs / memory per free GPU.")
+          "(they may end sooner).  CPU/G MEM/G: free CPUs / memory per free GPU.  A pending job that fits several "
+          "rows (e.g. a100 with no 40gb/80gb constraint) counts in each.")
 
 
 def group_bar(g):
@@ -381,27 +383,22 @@ def summary_head():
 
 
 def summary_row(g, now):
-    t = Text()
-    if g.pseudo:
-        t.append(f"{g.name:<11}", style="italic")
-        t.append(f"{'(no size constraint: can run on any ' + (g.base or 'type') + ')':<{LEFT_W - 11}}", style=B)
+    t = Text(f"{g.name:<11}", style="bold" if g.free else "")
+    t.append(f"{g.vram:>5}  ")
+    t.append(f"{g.free:>3} / {g.total:<3}", style="bold green" if g.free else B)
+    t.append("  ")
+    t.append_text(group_bar(g))
+    t.append("  ")
+    if g.free:
+        t.append(f"{g.cpu_free / g.free:>5.1f}  {fmt_mem(g.mem_free / g.free):>5}  ")
     else:
-        t.append(f"{g.name:<11}", style="bold" if g.free else "")
-        t.append(f"{g.vram:>5}  ")
-        t.append(f"{g.free:>3} / {g.total:<3}", style="bold green" if g.free else B)
-        t.append("  ")
-        t.append_text(group_bar(g))
-        t.append("  ")
-        if g.free:
-            t.append(f"{g.cpu_free / g.free:>5.1f}  {fmt_mem(g.mem_free / g.free):>5}  ")
-        else:
-            t.append(f"{'-':>5}  {'-':>5}  ", style=B)
+        t.append(f"{'-':>5}  {'-':>5}  ", style=B)
     t.append("│", style=B)
     for k, w, st in (("queued", 7, "yellow"), ("blocked", 8, "magenta"), ("held", 6, "")):
         v = g.pend_gpus.get(k, 0)
         t.append(f"{v:>{w}}", style=st if v else B)
     for v, w in ((g.ending_1h, 8), (g.ending_4h, 5)):
-        t.append(f"{v:>{w}}" if not g.pseudo else " " * w, style="cyan" if v else B)
+        t.append(f"{v:>{w}}", style="cyan" if v else B)
     ns = f"in {fmt_rel(g.next_start - now)}" if g.next_start else "-"
     t.append(f"  {ns:<10}  ", style="" if g.next_start else B)
     notes = []
@@ -455,7 +452,7 @@ def queue_row(j, user, now):
     start = f"in {fmt_rel(j.start_t - now)}" if j.start_t and j.start_t > now else "-"
     waited = fmt_rel(now - j.submit_t) if j.submit_t else "-"
     return Text(f"{j.id:<20}{j.user:<11}{gp:>7}  {j.reason[:18]:<19}{j.prio:>9}{waited:>8}{start:>11}  "
-                f"{j.features[:11]:<12}{j.partition[:6]:<7}{j.name}", style="bold cyan" if j.user == user else "")
+                f"{(j.features or j.fits)[:11]:<12}{j.partition[:6]:<7}{j.name}", style="bold cyan" if j.user == user else "")
 
 
 def pend_order(j):
@@ -478,17 +475,17 @@ def render_detail(snap, name):
         return [Text(f"no GPU type {name!r} in the last poll (types: {', '.join(x.name for x in snap.groups)})",
                      style="yellow")]
     out = [summary_head(), summary_row(g, snap.t), Text("")]
-    nodes = sorted(snap.group_nodes(g), key=lambda n: (not n.ok, n.stranded, -n.free, n.name))
+    nodes = sorted(g.nodes, key=lambda n: (not n.ok, n.stranded, -n.free, n.name))
     out.append(Text(f"Nodes ({len(nodes)})", style="bold underline"))
     out.append(Text(NODE_HEAD, style="bold"))
     out += [node_row(n, snap.user) for n in nodes]
     pend = sorted(g.pending, key=pend_order)
     out.append(Text(""))
     out.append(Text(f"Pending jobs ({sum(j.tasks for j in pend)})", style="bold underline"))
-    other = snap.group(f"{g.base}-any") if not g.pseudo else None
-    if other and other.pending:
-        out.append(Text(f"+ {sum(j.tasks for j in other.pending)} jobs ({sum(j.gpus * j.tasks for j in other.pending)} GPUs) "
-                        f"pending for any {g.base} also compete for these nodes: see {other.name}", style="italic"))
+    shared = [j for j in pend if j.fits]
+    if shared:
+        out.append(Text(f"{sum(j.tasks for j in shared)} of these ({sum(j.gpus * j.tasks for j in shared)} GPUs) can also run "
+                        f"on other rows: {', '.join(sorted({j.fits for j in shared}))}", style="italic"))
     if not pend:
         out.append(Text("none", style=B))
     for k, label in CLASSES:
@@ -514,7 +511,7 @@ def snapshot_json(snap, name=None):
                 "reason": j.reason, "class": j.klass, "prio": j.prio,
                 "waited_s": round(snap.t - j.submit_t) if j.submit_t else None,
                 "est_start_s": round(j.start_t - snap.t) if j.start_t and j.start_t > snap.t else None,
-                "constraint": j.features, "partition": j.partition, "name": j.name}
+                "constraint": j.features, "fits": j.fits, "partition": j.partition, "name": j.name}
 
     groups = []
     for g in snap.groups:
@@ -527,7 +524,7 @@ def snapshot_json(snap, name=None):
              "ending_1h": g.ending_1h, "ending_4h": g.ending_4h,
              "next_start_s": round(g.next_start - snap.t) if g.next_start else None, "mine_pending": g.mine}
         if name:
-            d["nodes"] = [node(n) for n in snap.group_nodes(g)]
+            d["nodes"] = [node(n) for n in g.nodes]
             d["pending"] = [job(j) for j in sorted(g.pending, key=pend_order)]
         groups.append(d)
     return {"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(snap.t)), "user": snap.user, "groups": groups}
