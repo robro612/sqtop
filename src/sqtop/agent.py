@@ -11,6 +11,7 @@ import urllib.request
 
 from .core import (
     ANSI_RE,
+    BATCH_SHELL_RE,
     JOB_PIDS_SH,
     MONITOR_MARK,
     PDEATH,
@@ -59,7 +60,6 @@ ss -Hltnp 2>/dev/null | sed "s/^/L|$h|/"
 """.replace("MARK", MONITOR_MARK).replace("@JOB_PIDS@", JOB_PIDS_SH.strip())
 
 
-BATCH_SHELL_RE = re.compile(r"^/bin/(ba)?sh /var/spool/slurm\S*/slurm_script")
 
 
 def parse_window(s):

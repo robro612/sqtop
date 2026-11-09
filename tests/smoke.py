@@ -31,11 +31,15 @@ async def drive(m, size, out):
         shots = [("main", [])]
         app.save_screenshot(f"{out}/1_main.svg")
         steps = [
+            ("1b_procs_view_default_sort", ["v", "v"], 1),
             ("2_selected", ["down", "down"], 1),
             ("3_metrics", ["enter"], 4),
             ("4_log", ["escape", "l"], 2),
             ("5_env", ["escape", "e"], 6),
             ("6_compact_sorted", ["escape", "o", "G", "c"], 1),
+            ("6b_procs_view", ["v", "a", "home"], 1),
+            ("6c_proc_metrics", ["enter"], 3),
+            ("6d_jobs_view", ["escape", "v"], 1),
             ("7_help", ["h"], 0.5),
             ("8_zoomed", ["x", "f", "-", "-", "-"], 1),
             ("9_gpus", ["g"], 4),

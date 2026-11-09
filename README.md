@@ -47,12 +47,13 @@ Keys (press `h` in the app for the full list):
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `Home` `End` `PgUp` `PgDn`, wheel, click | select a row (a job / process) |
+| `↑` `↓` `Home` `End` `PgUp` `PgDn`, wheel, click | select a row (a job, or a process in the process view) |
+| `v` | toggle the jobs table between one row per job (default) and one row per process |
 | double-click a cell | copy its full text, e.g. a whole array ID or command line (needs a terminal with OSC 52 clipboard support; in tmux, `set -g set-clipboard on`) |
-| `Enter` | per-process metrics: charts for the process plus job details |
-| `e` | process environment, fetched from the node on demand |
+| `Enter` | job view: charts for the job, its details and its processes; process view: charts for that process plus job details |
+| `e` | environment of the selected process (job view: the job's main process), fetched from the node on demand |
 | `l` | tail the job's log (StdOut/StdErr; `Tab` switches) |
-| `o` + letter, `,` `.`, `/` | sort: `j` job, `n` name, `r` gres, `t` time, `d` node, `g` GPU-mem, `s` %SM, `b` %GMBW, `c` %CPU, `m` %MEM; `/` flips direction |
+| `o` + letter, `,` `.`, `/` | sort: `j` job, `n` name, `r` gres, `t` time, `d` node, `g` GPU-mem, `s` %SM, `c` CPU, `m` %MEM; job view also `u` %UTL, `p` procs; process view also `b` %GMBW, `i` GPU, `p` PID; `/` flips direction |
 | `a` `f` `c` | display mode: auto / full / compact |
 | `+` `-` | zoom charts (seconds per braille dot) |
 | `←` `→` `^` `$` | scroll the command column |
@@ -79,7 +80,13 @@ Conventions:
 - RAM excludes page cache, which fills to the cgroup limit but can be reclaimed.
 - `%MEM` is a share of the job's memory limit, not of the node.
 - `TIME` is the job's elapsed time, coloured as the time limit approaches.
-- The `GPU` and `PID` columns appear only when some job has several GPUs or several processes.
+- The jobs table has two sections, GPU jobs and then CPU-only jobs, each with its own columns.
+  The per-GPU device panel above it is the same in both views.
+- Job view: `GPU-MEM` is summed over the job's GPUs, `%UTL` is their mean utilization, `CPU` is
+  cores in use / allocated, and `COMMAND` is the job's oldest process, not counting the batch
+  script. `PROCS` counts the job's processes (for GPU jobs, the ones using its GPUs).
+- Process view: `%CPU` is per process (100 = one core). The `GPU` and `PID` columns appear only
+  when some job in that section has several GPUs or several processes.
 
 ## Agent / script mode
 

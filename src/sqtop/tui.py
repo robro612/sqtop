@@ -1,4 +1,4 @@
-"""Textual app and screens (main, help, process metrics, environment, log)."""
+"""Textual app and screens (main, help, job metrics, environment, log)."""
 import os
 import signal
 import subprocess
@@ -15,24 +15,37 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from .cluster import ClusterMonitor, render_detail, render_summary
-from .core import PDEATH, RES_STEPS, STEP_NAME, Job, Monitor, human_bytes, job_mem_limit, read_log_lines, scontrol_job, short_args
+from .core import (
+    PDEATH,
+    RES_STEPS,
+    STEP_NAME,
+    Job,
+    Monitor,
+    human_bytes,
+    job_mem_limit,
+    read_log_lines,
+    scontrol_job,
+    short_args,
+)
 from .render import (
-    COLS,
     RAM_STYLE,
-    SORT_KEYS,
+    VIEWS,
     B,
+    JobRow,
     ProcRow,
     braille,
     bucketize,
     cell_text_at,
     fit,
+    job_row,
+    job_series,
     mem_style,
-    proc_rows,
     render_charts,
     render_devices,
     render_host,
-    render_procs,
+    render_table,
     sort_rows,
+    table_items,
     time_axis,
     util_style,
 )
@@ -41,7 +54,7 @@ CSS = """
 Screen { background: ansi_default; color: ansi_default; }
 #header, #status { height: 1; }
 #devices, #host, #charts { height: auto; }
-#procs { height: 1fr; }
+#procs, #jobs { height: 1fr; }
 .pad { padding: 0 1; }
 """
 
@@ -52,31 +65,41 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   a f c    display mode: auto / full / compact      h ?     this help
   r F5     re-poll squeue now                       q ^C    quit
 
-  ↑ ↓      select process                           Esc     clear selection
-  Home End first / last process                     PgUp PgDn  page through processes
+  ↑ ↓      select row                               Esc     clear selection
+  Home End first / last row                         PgUp PgDn  page through rows
   ← → ^ $  scroll COMMAND column (also ^A ^E)       wheel   scroll, click selects
   double-click a cell: copy its full text (via your terminal's OSC 52 clipboard support)
 
-  Enter    process metrics (charts for that process + job details)
+  Enter    metrics: job view: charts for the job, its details and its processes;
+           process view: charts for that process + job details
+  v        toggle the table: one row per job / one row per process
   g        cluster GPUs: free / queued by GPU type or by node (Enter on a type: its nodes + queue)
-  e        process environment (fetched from the node on demand)
+  e        environment of the selected process / job's main process (fetched on demand)
   l        tail the selected job's log (StdOut/StdErr; Tab switches)
   + -      zoom charts (seconds per braille dot)
 
-  The bottom table is one row per job process (like squeue, plus live metrics);
-  pending jobs are listed last with their reason. TIME is the job's elapsed time.
+  The bottom table has two sections, GPU jobs then CPU-only jobs, with pending jobs
+  listed last in each with their reason. TIME is the job's elapsed time.
+  Job view (default): one row per job (like squeue, plus live metrics). COMMAND is the
+  job's main process (its oldest, not counting the batch script); PROCS counts its
+  processes (GPU jobs: the processes using its GPUs).
+  Process view (v): one row per job process; GPU / PID columns appear only when a job
+  has several GPUs / processes. The per-GPU device panel above shows in both views.
   Charts show the selected row's job, or all jobs averaged when nothing is selected.
   History before sqtop started comes from Prometheus (1-minute resolution).
 
   Sort:  oj JOB   on NAME   or GRES   ot TIME   od NODE   og GPU-MEM   os %SM
-         ob %GMBW   oc %CPU   om %MEM   oi GPU   op PID
-         (GPU / PID columns appear only when a job has several GPUs / processes)
+         oc CPU   om %MEM   job view: ou %UTL  op PROCS
+         process view: ob %GMBW  oi GPU  op PID
          , .  previous / next sort column        /  invert sort order
          (lowercase = default direction, uppercase = reversed)
 
   Colors: GPU util < 30% red, < 70% yellow, else green (low util is the problem
   for training jobs, so this is inverted from nvitop's load coloring).
-  %MEM is a process's RSS as a share of its job's memory limit.
+  GPU-MEM is summed over the job's GPUs; %UTL is their mean device utilization and
+  %SM the mean per GPU of its processes' pmon %SM. CPU is cores in use / allocated.
+  %MEM is the job's RAM as a share of its memory limit (process view: the process's RSS).
+  Process view %CPU is a process's CPU (100 = one core).
   RAM excludes page cache, which fills to the cgroup limit but is reclaimable.
 
 Press any key to return."""
@@ -93,7 +116,7 @@ class Lines(Widget):
         return Group(*self.fn(self.size.width, self.size.height))
 
 
-class ProcPanel(Lines):
+class JobPanel(Lines):
     def on_mouse_scroll_down(self, event):
         self.screen.move_cursor(+3)
 
@@ -106,7 +129,7 @@ class ProcPanel(Lines):
         if event.chain == 2:
             self.screen.copy_cell(event.x)
         else:
-            self.screen.click_row(event.y - 4)
+            self.screen.click_row(event.y - 2)
 
 
 class MainScreen(Screen):
@@ -116,7 +139,9 @@ class MainScreen(Screen):
         self.mode = "a"
         self.res_i = 0
         self.sort_key, self.sort_rev = "job", False
-        self.rows: list[ProcRow] = []
+        self.view = VIEWS["jobs"]
+        self.rows: list[JobRow | ProcRow] = []
+        self.items: list[tuple] = []
         self.sel = None          # selected row key
         self.row_off = 0
         self.hscroll = 0
@@ -128,7 +153,7 @@ class MainScreen(Screen):
         yield Static(id="devices")
         yield Static(id="host")
         yield Static(id="charts")
-        yield ProcPanel(self.proc_lines, id="procs")
+        yield JobPanel(self.job_lines, id="jobs")
         yield Static(id="status")
 
     def on_mount(self):
@@ -159,14 +184,14 @@ class MainScreen(Screen):
 
     def layout_for(self, w, chart_h):
         """-> (compact, show_charts, device lines). Auto mode degrades full+charts -> full -> compact
-        so the process panel always keeps a few rows."""
+        so the jobs panel always keeps a few rows."""
         if self.mode == "c":
             return True, False, render_devices(self.m, w, True, self.sel_job())
         full = render_devices(self.m, w, False, self.sel_job())
         if self.mode == "f":
             return False, True, full
         avail = self.size.height - 2 - (2 if self.sel_job() else 0)   # header + status (+ host panel)
-        need = 5 + min(max(1, len(self.rows)), 6)         # process box + a few rows
+        need = 3 + min(max(1, len(self.items)), 8)        # jobs box + a few lines
         if len(full) + chart_h + need <= avail:
             return False, True, full
         if len(full) + need <= avail:
@@ -176,9 +201,10 @@ class MainScreen(Screen):
     # -- rendering
     def tick(self):
         w = self.size.width or 120
-        self.rows = sort_rows(proc_rows(self.m), self.sort_key, self.sort_rev)
+        self.rows = sort_rows(self.view, self.view.rows(self.m), self.sort_key, self.sort_rev)
+        self.items = table_items(self.rows)
         if self.sel is not None and self.cur_index() is None:
-            self.sel = None   # process went away
+            self.sel = None   # job went away
         ch = 4 if self.size.height >= 60 else 3
         compact, show_charts, dev = self.layout_for(w, 2 * ch + 3)
         jobs, streams, _ = self.m.snapshot()
@@ -204,15 +230,16 @@ class MainScreen(Screen):
         charts.display = show_charts
         if show_charts:
             charts.update(Group(*render_charts(self.m, w, self.sel_job(), self.res, ch)))
-        self.query_one("#procs").refresh()
+        self.query_one("#jobs").refresh()
         st = Text()
         if self.msg and time.time() - self.msg_t < 5:
             st.append(f" {self.msg}", style="yellow")
         elif self.await_sort:
-            st.append(" sort by: j job  n name  r gres  t time  d node  g gpu-mem  s %sm  b %gmbw  c %cpu  m %mem"
-                      "  i gpu  p pid", style="yellow")
+            hdr = {c[0]: c[1].lower() for c in self.view.COLS}
+            st.append(" sort by: " + "  ".join(f"{k} {hdr[v]}" for k, v in self.view.SORT_KEYS.items()), style="yellow")
         else:
-            st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · e env · l log · g gpus · o sort · a/f/c mode"
+            st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · v jobs/procs · e env · l log · g gpus · o sort"
+                      " · a/f/c mode"
                       " · +/- zoom",
                       style=B)
         age = time.time() - self.m.last_squeue if self.m.last_squeue else 0
@@ -223,16 +250,21 @@ class MainScreen(Screen):
             st = Text(f" squeue error: {self.m.squeue_err}", style="red")
         self.query_one("#status").update(st)
 
-    def proc_lines(self, w, h):
-        body_h = max(1, h - 5)
+    def job_lines(self, w, h):
+        body_h = max(1, h - 3)
         c = self.cur_index()
         if c is not None:
-            if c < self.row_off:
-                self.row_off = c
-            elif c >= self.row_off + body_h:
-                self.row_off = c - body_h + 1
-        self.row_off = max(0, min(self.row_off, max(0, len(self.rows) - body_h)))
-        return render_procs(self.rows, w, h, c, self.row_off, self.hscroll, self.sort_key, self.sort_rev, self.m.a.user)
+            ci = self.items.index(("row", c))
+            top = ci
+            while top > 0 and self.items[top - 1][0] != "row":
+                top -= 1   # keep the section's title + header in view
+            if top < self.row_off:
+                self.row_off = top
+            elif ci >= self.row_off + body_h:
+                self.row_off = ci - body_h + 1
+        self.row_off = max(0, min(self.row_off, max(0, len(self.items) - body_h)))
+        return render_table(self.view, self.rows, self.items, w, h, c, self.row_off, self.hscroll, self.sort_key, self.sort_rev,
+                           self.m.a.user)
 
     # -- navigation
     def move_cursor(self, d):
@@ -243,27 +275,38 @@ class MainScreen(Screen):
         self.sel = self.rows[c].key
         self.tick()
 
+    def toggle_view(self):
+        """Switch between one row per job and one row per process, keeping the selected job."""
+        jid = self.sel_job()
+        self.view = VIEWS["processes" if self.view.name == "jobs" else "jobs"]
+        if self.sort_key not in self.view.SORT_KEYS.values():
+            self.sort_key, self.sort_rev = "job", False
+        self.hscroll = 0
+        self.rows = sort_rows(self.view, self.view.rows(self.m), self.sort_key, self.sort_rev)
+        self.sel = next((r.key for r in self.rows if r.jobid == jid), None) if jid else None
+        self.note(f"view: one row per {'job' if self.view.name == 'jobs' else 'process'}")
+
     def copy_cell(self, x):
         r = self.sel_row()
         if r:
-            text = cell_text_at(self.rows, r, x)
+            text = cell_text_at(self.view, self.rows, r, x)
             if text:
                 self.app.copy_to_clipboard(text)
                 self.note(f"copied: {text[:80]}" + ("…" if len(text) > 80 else ""))
 
     def click_row(self, i):
         i += self.row_off
-        if 0 <= i < len(self.rows):
-            self.sel = self.rows[i].key
+        if 0 <= i < len(self.items) and self.items[i][0] == "row":
+            self.sel = self.rows[self.items[i][1]].key
             self.tick()
 
     def on_key(self, event):
         k, ch = event.key, event.character
-        page = max(1, self.query_one("#procs").size.height - 6)
+        page = max(1, self.query_one("#jobs").size.height - 6)
         if self.await_sort:
             self.await_sort = False
-            if ch and ch.lower() in SORT_KEYS:
-                self.sort_key = SORT_KEYS[ch.lower()]
+            if ch and ch.lower() in self.view.SORT_KEYS:
+                self.sort_key = self.view.SORT_KEYS[ch.lower()]
                 self.sort_rev = ch.isupper()
             self.tick()
             event.stop()
@@ -306,11 +349,13 @@ class MainScreen(Screen):
             self.hscroll = max(0, len(short_args(r.args)) - 30) if r else 0
         elif ch == "g":
             self.app.push_screen(ClusterScreen(self.app.cm))
+        elif ch == "v":
+            self.toggle_view()
         elif ch == "o":
             self.await_sort = True
             self.tick()
         elif ch in (",", "."):
-            keys = [c[0] for c in COLS]
+            keys = [c[0] for c in self.view.COLS]
             self.sort_key = keys[(keys.index(self.sort_key) + (1 if ch == "." else -1)) % len(keys)]
             self.sort_rev = False
             self.tick()
@@ -323,14 +368,23 @@ class MainScreen(Screen):
         elif ch in ("-", "_"):
             self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
             self.tick()
-        elif k in ("enter",) or ch == "e":
+        elif k == "enter":
+            r = self.sel_row()
+            if r and r.pending:
+                self.note("job is pending")
+            elif r:
+                self.app.push_screen(JobScreen(self.m, r.jobid) if self.view.name == "jobs" or not r.pid
+                                     else ProcScreen(self.m, r))
+            else:
+                self.note("select a job first (↑/↓)")
+        elif ch == "e":
             r = self.sel_row()
             if r and not r.pid:
-                self.note("job is pending" if r.pending else "no process selected in that job yet")
+                self.note("job is pending" if r.pending else "no processes seen in that job yet")
             elif r:
-                self.app.push_screen(MetricsScreen(self.m, r) if k == "enter" else EnvScreen(r))
+                self.app.push_screen(EnvScreen(r))
             else:
-                self.note("select a process first (↑/↓)")
+                self.note("select a job first (↑/↓)")
         elif ch == "l":
             r = self.sel_row()
             jobs, _, _ = self.m.snapshot()
@@ -342,10 +396,10 @@ class MainScreen(Screen):
             elif job:
                 self.app.push_screen(LogScreen(job))
             else:
-                self.note("select a process first (↑/↓) to pick its job's log")
+                self.note("select a job first (↑/↓) to pick its log")
         else:
             return
-        self.query_one("#procs").refresh()
+        self.query_one("#jobs").refresh()
         event.stop()
 
 
@@ -390,13 +444,14 @@ class HelpScreen(TextScreen):
 
 
 class EnvScreen(TextScreen):
-    def __init__(self, r: ProcRow):
+    def __init__(self, r: JobRow | ProcRow):
         super().__init__()
         self.r = r
 
     def on_mount(self):
         super().on_mount()
-        self.query_one("#header").update(Text(f" environment  pid {self.r.pid}  job {self.r.display}  {self.r.host} ",
+        self.query_one("#header").update(Text(f" environment  job {self.r.display}  pid {self.r.pid}"
+                                              f"{' (main process)' if isinstance(self.r, JobRow) else ''}  {self.r.host} ",
                                               style="bold reverse green"))
         self.query_one("#content").update(Text("fetching via srun --overlap…", style="yellow"))
         self.query_one("#status").update(Text(" Esc/q back · ↑↓ PgUp PgDn scroll", style=B))
@@ -478,7 +533,148 @@ class LogScreen(TextScreen):
         return True
 
 
-class MetricsScreen(Screen):
+class JobScreen(Screen):
+    """Full-screen charts for one job, its SLURM details and its processes."""
+
+    def __init__(self, m: Monitor, jobid: str):
+        super().__init__()
+        self.m, self.jobid = m, jobid
+        self.res_i = 0
+        self.info: dict = {}
+        self.r: JobRow | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="header")
+        yield Lines(self.draw_lines, id="procs")
+        yield Static(id="status")
+
+    def on_mount(self):
+        threading.Thread(target=lambda: setattr(self, "info", scontrol_job(self.jobid)), daemon=True).start()
+        self.set_interval(1.0, self.tick)
+        self.tick()
+
+    def job(self):
+        jobs, streams, _ = self.m.snapshot()
+        job = next((j for j in jobs if j.jobid == self.jobid), None)
+        return job, streams.get(self.jobid)
+
+    def tick(self):
+        job, s = self.job()
+        if job:
+            self.r = job_row(job, s)
+        r = self.r
+        hdr = f" job metrics  {r.display}  {r.name}  {r.node}  {r.gres if r.gpu_job else 'CPU-only'} " if r else " job metrics "
+        self.query_one("#header").update(Text(hdr, style="bold reverse green"))
+        self.query_one("#status").update(Text(f" Esc/q/Enter back · +/- zoom ({RES_STEPS[self.res_i]}s/dot) · e env · l log",
+                                              style=B))
+        self.query_one("#procs").refresh()
+
+    def proc_table(self, s, job, n, w):
+        """Header + up to n process lines (most GPU memory, then most CPU, first)."""
+        with s.lock:
+            gidx = {(g.host, g.uuid): g.index for g in s.gpus.values()}
+            procs = [(h, p, gidx.get((h, p.gpu_uuid), -1), s.sm_of(h, p.pid, gidx.get((h, p.gpu_uuid), -1))[0])
+                     for h, ps in s.procs.items() for p in ps]
+        procs.sort(key=lambda x: (-x[1].gpu_mem, -(x[1].cpu_pct or 0)))
+        multi = job.nnodes > 1
+        hdr = Text(" ")
+        if multi:
+            hdr.append(f"{'NODE':<9} ", style="bold")
+        hdr.append(f"{'PID':>8} ", style="bold")
+        if job.has_gpu:
+            hdr.append(f"{'GPU':>3} {'GPU-MEM':>8} {'%SM':>4} ", style="bold")
+        hdr.append(f"{'%CPU':>6} {'RSS':>8}  COMMAND", style="bold")
+        out = [Text(f" Processes ({len(procs)})", style="bold"), fit(hdr, w)]
+        for h, p, gi, sm in procs[:n]:
+            t = Text(" ")
+            if multi:
+                t.append(f"{h[:9]:<9} ", style=B)
+            t.append(f"{p.pid:>8} ", style="bold" if p.pid == (self.r.pid if self.r else 0) else "")
+            if job.has_gpu:
+                t.append(f"{gi if gi >= 0 else '-':>3} ")
+                t.append(f"{p.gpu_mem / 1024:.1f}GiB".rjust(8) + " " if gi >= 0 else f"{'-':>8} ", style="magenta")
+                t.append(f"{sm:.0f}".rjust(4) + " " if sm is not None else f"{'-':>4} ", style=util_style(sm))
+            t.append(f"{p.cpu_pct:.1f}".rjust(6) + " " if p.cpu_pct is not None else f"{'-':>6} ")
+            t.append(f"{human_bytes(p.rss_kb * 1024):>8}  ")
+            t.append(short_args(p.args))
+            out.append(fit(t, w))
+        if len(procs) > n:
+            out.append(Text(f"  … {len(procs) - n} more", style=B))
+        if not procs:
+            out.append(Text("  (no processes yet)", style=B))
+        return out
+
+    def draw_lines(self, w, h):
+        job, s = self.job()
+        r = self.r
+        if s is None or job is None or r is None:
+            return [Text(" job is no longer running", style="yellow")]
+        res = RES_STEPS[self.res_i]
+        ncols = w - 4
+        util, gmem, cpu, ram = job_series(job, s, time.time(), res, 2 * ncols)
+        out = [Text(" ") + Text(short_args(r.args)[: max(10, w * 2 - 4)], style="bold")]
+        meta = Text(" ", style=B)
+        for k in ("WorkDir", "StdOut", "SubmitTime", "StartTime", "TimeLimit", "AllocTRES"):
+            if self.info.get(k):
+                meta.append(f"{k}=", style=B)
+                meta.append(f"{self.info[k]}  ")
+        out += [meta, Text("")]
+        with s.lock:
+            nproc = sum(len(ps) for ps in s.procs.values())
+        nblocks = 4 if job.has_gpu else 2
+        nlist = min(max(1, nproc), max(3, (h - 4) // 3))
+        list_h = nlist + 2 + (1 if nproc > nlist else 0)
+        hh = max(2, (h - len(out) - 1 - list_h - 1 - nblocks) // nblocks)
+
+        def block(title, vals, style):
+            return [Text("  ") + fit(x, ncols) for x in [title] + braille(vals, hh, True, style)]
+
+        if job.has_gpu:
+            t = Text(" GPU UTL (mean of the job's GPUs, incl. history) ", style="bold")
+            t.append(f"{r.util:.0f}%" if r.util is not None else "-", style=util_style(r.util))
+            if r.sm is not None:
+                t.append(f"   %SM {r.sm:.0f}", style=B)
+            out += block(t, util, lambda v: util_style(100 * v if v is not None else None))
+            t = Text(" GPU MEM ", style="bold")
+            t.append(f"{r.gmem / 1024:.1f} of {r.gtot / 1024:.0f} GiB" if r.gmem is not None and r.gtot else "-",
+                     style="magenta")
+            out += block(t, gmem, mem_style)
+        t = Text(" CPU ", style="bold")
+        t.append(f"{r.cores:.1f} of {job.cpus} cores" if r.cores is not None else "-", style="cyan")
+        out += block(t, cpu, lambda v: "cyan")
+        t = Text(" RAM ", style="bold")
+        t.append(f"{r.mem:.0f}% of limit (excl. cache)" if r.mem is not None else "-", style=RAM_STYLE)
+        out += block(t, ram, lambda v: RAM_STYLE)
+        out.append(Text("  ") + time_axis(ncols, res))
+        out.append(Text(""))
+        out += self.proc_table(s, job, nlist, w)
+        return out[:h]
+
+    def on_key(self, event):
+        ch = event.character
+        if event.key in ("escape", "q", "enter"):
+            self.app.pop_screen()
+        elif ch in ("+", "="):
+            self.res_i = max(0, self.res_i - 1)
+            self.tick()
+        elif ch in ("-", "_"):
+            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
+            self.tick()
+        elif ch == "e":
+            if self.r and self.r.pid:
+                self.app.push_screen(EnvScreen(self.r))
+        elif ch == "l":
+            job, _ = self.job()
+            if job:
+                self.app.push_screen(LogScreen(job))
+        else:
+            return
+        event.stop()
+
+
+class ProcScreen(Screen):
+    """Charts for one process (per-process view), plus its job's details."""
+
     def __init__(self, m: Monitor, r: ProcRow):
         super().__init__()
         self.m, self.r = m, r

@@ -31,6 +31,10 @@ STEP_END_RE = re.compile(r"CANCELLED|Job step aborted|forcing job termination|ta
 STALE_S = 5.0
 
 
+# the batch script itself, as ps shows it (not worth naming a job by)
+BATCH_SHELL_RE = re.compile(r"^/bin/(ba)?sh /var/spool/slurm\S*/slurm_script")
+
+
 RESTART_BACKOFF_S = 15.0
 
 

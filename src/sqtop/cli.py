@@ -50,7 +50,7 @@ from rich.console import Console, Group
 from . import cluster
 from .agent import _clean, collect_json, parse_window
 from .core import Monitor
-from .render import proc_rows, render_charts, render_devices, render_procs, sort_rows
+from .render import VIEWS, render_charts, render_devices, render_table, sort_rows, table_items
 from .tui import SqTop
 
 
@@ -109,8 +109,10 @@ def main():
             w = console.width
             console.print(Group(*render_devices(m, w, False, None)))
             console.print(Group(*render_charts(m, w, None, 1, 3)))
-            rows = sort_rows(proc_rows(m), "job", False)
-            console.print(Group(*render_procs(rows, w, len(rows) + 6, None, 0, 0, "job", False, a.user)))
+            view = VIEWS["jobs"]
+            rows = sort_rows(view, view.rows(m), "job", False)
+            items = table_items(rows)
+            console.print(Group(*render_table(view, rows, items, w, len(items) + 4, None, 0, 0, "job", False, a.user)))
         finally:
             m.shutdown()
         return

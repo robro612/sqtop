@@ -1,4 +1,4 @@
-"""Rendering: nvitop-style device table, host panel, braille charts, jobs & processes table."""
+"""Rendering: nvitop-style device table, host panel, braille charts, jobs table."""
 import os
 import time
 from dataclasses import dataclass
@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from rich.text import Text
 
 from .core import (
+    BATCH_SHELL_RE,
     STALE_S,
     Job,
     Monitor,
@@ -498,9 +499,23 @@ def render_charts(m: Monitor, width: int, sel_job: str | None, res: int, height:
     return [Text(" ") + lft + Text(" │ ", style=B) + rgt for lft, rgt in zip(left, right)]
 
 
+def main_proc(procs):
+    """The process that best names a job: the oldest one that isn't the batch script itself."""
+    cand = [p for p in procs if not BATCH_SHELL_RE.match(p.args)] or procs
+    return max(cand, key=lambda p: (p.etime or 0, p.gpu_mem), default=None)
+
+
+def _job_base(job: Job):
+    running = job.state == "RUNNING"
+    return {"jobid": job.jobid, "display": job.display, "name": job.name, "gres": gres_short(job.gres),
+            "node": job.nodes if running else "", "state": job.state, "reason": job.reason,
+            "jtime": job.elapsed_now() if running else None, "left": job.left_now() if running else None,
+            "limit": parse_dur(job.limit), "gpu_job": job.has_gpu, "cpus": job.cpus}
+
+
 @dataclass
-class ProcRow:
-    key: tuple
+class JobRow:
+    key: str             # jobid
     jobid: str
     display: str
     name: str
@@ -511,6 +526,40 @@ class ProcRow:
     jtime: float | None  # job elapsed (s)
     left: float | None   # job time left (s)
     limit: float | None
+    gpu_job: bool
+    cpus: int
+    gmem: float | None = None    # MiB used on the job's GPUs (sum)
+    gtot: float | None = None    # MiB on the job's GPUs (sum)
+    util: float | None = None    # device util, mean over the job's GPUs
+    sm: float | None = None      # pmon %SM of the job's processes, per GPU summed, mean over GPUs
+    cores: float | None = None   # cgroup CPU, cores in use (all nodes)
+    mem: float | None = None     # cgroup RAM (excl. cache) as % of the limit
+    nproc: int | None = None
+    host: str = ""               # main process's node
+    pid: int = 0                 # main process
+    gpu: int = -1                # (always -1: a job row isn't tied to one GPU)
+    args: str = ""
+
+    @property
+    def pending(self):
+        return self.state != "RUNNING"
+
+
+@dataclass
+class ProcRow:
+    key: tuple
+    jobid: str
+    display: str
+    name: str
+    gres: str
+    node: str
+    state: str
+    reason: str
+    jtime: float | None
+    left: float | None
+    limit: float | None
+    gpu_job: bool
+    cpus: int
     host: str = ""
     gpu: int = -1
     gpu_label: str = "-"
@@ -527,36 +576,51 @@ class ProcRow:
         return self.state != "RUNNING"
 
 
-# key, header, width, default descending?, left-aligned?
-COLS = [
-    ("job", "JOB", 18, False, True),    # fits pending array ranges, e.g. 1234567_[10-99%4]
-    ("name", "NAME", 16, False, True),
-    ("gres", "GRES", 9, False, True),
-    ("time", "TIME", 10, True, False),
-    ("node", "NODE", 9, False, True),
-    ("gpu", "GPU", 6, False, False),       # only shown when some job has several GPUs
-    ("pid", "PID", 8, False, False),       # only shown when some job has several processes
-    ("gmem", "GPU-MEM", 8, True, False),
-    ("sm", "%SM", 4, True, False),
-    ("gmbw", "%GMBW", 5, True, False),
-    ("cpu", "%CPU", 6, True, False),
-    ("mem", "%MEM", 5, True, False),
-]
+def job_row(job: Job, s: Stream | None) -> JobRow:
+    r = JobRow(key=job.jobid, **_job_base(job))
+    if r.pending or s is None:
+        return r
+    st = job_stats(job, s)
+    if st:
+        r.cores = st[0]
+        r.mem = 100 * st[2] / st[3] if st[3] else None
+    now = time.time()
+    with s.lock:
+        gpus = [g for g in s.gpus.values() if now - g.t <= STALE_S]
+        procs = [(h, p) for h, ps in s.procs.items() for p in ps]
+        if gpus:
+            us = [g.util for g in gpus if g.util is not None]
+            r.util = sum(us) / len(us) if us else None
+            if any(g.mem_used is not None for g in gpus):
+                r.gmem = sum(g.mem_used or 0 for g in gpus)
+                r.gtot = sum(g.mem_total or 0 for g in gpus) or None
+            sms = {}
+            for h, p in procs:
+                g = next((g for g in gpus if g.host == h and g.uuid == p.gpu_uuid), None)
+                v = s.sm_of(h, p.pid, g.index)[0] if g else None
+                if v is not None:
+                    sms[(h, g.index)] = sms.get((h, g.index), 0) + v
+            r.sm = sum(sms.values()) / len(gpus) if sms else None
+    r.nproc = len({(h, p.pid) for h, p in procs})
+    mp = main_proc([p for _, p in procs])
+    if mp:
+        r.pid, r.args = mp.pid, mp.args
+        r.host = next(h for h, p in procs if p is mp)
+    else:
+        r.args = "(no processes yet)"
+    return r
 
 
-SORT_KEYS = {"j": "job", "n": "name", "r": "gres", "t": "time", "d": "node", "i": "gpu", "p": "pid",
-             "g": "gmem", "s": "sm", "b": "gmbw", "c": "cpu", "m": "mem"}
+def job_rows(m: Monitor):
+    jobs, streams, _ = m.snapshot()
+    return [job_row(j, streams.get(j.jobid)) for j in jobs]
 
 
 def proc_rows(m: Monitor):
     jobs, streams, _ = m.snapshot()
     rows = []
     for job in jobs:
-        running = job.state == "RUNNING"
-        base = {"jobid": job.jobid, "display": job.display, "name": job.name, "gres": gres_short(job.gres),
-                "node": job.nodes if running else "", "state": job.state, "reason": job.reason,
-                "jtime": job.elapsed_now() if running else None, "left": job.left_now() if running else None,
-                "limit": parse_dur(job.limit)}
+        base = _job_base(job)
         s = streams.get(job.jobid)
         if job.state != "RUNNING" or s is None:
             rows.append(ProcRow(key=("job", job.jobid), **base))
@@ -580,33 +644,13 @@ def proc_rows(m: Monitor):
     return rows
 
 
-def sort_rows(rows, key, reverse):
-    def k(r):
-        v = {"job": (r.jobid, r.gpu, r.pid), "name": r.name, "gres": r.gres, "time": r.jtime, "node": r.node,
-             "gpu": (r.host, r.gpu, r.pid), "pid": r.pid, "gmem": r.gmem, "sm": r.sm, "gmbw": r.gmbw,
-             "cpu": r.cpu, "mem": r.mem}[key]
-        return (v is None, v if v is not None else 0)
-    desc = {c[0]: c[3] for c in COLS}[key] != reverse
-    running = [r for r in rows if not r.pending]
-    have = sorted([r for r in running if not k(r)[0]], key=k, reverse=desc)
-    # rows missing the sort value stay below, pending jobs always last (in job order)
-    return have + [r for r in running if k(r)[0]] + [r for r in rows if r.pending]
+def _cpu_cell(r):
+    if r.pending:
+        return "-", B
+    return (f"{r.cores:.1f}/{r.cpus}" if r.cores is not None else f"-/{r.cpus}"), "cyan"
 
 
-def visible_cols(rows):
-    """Drop GPU / PID unless they distinguish rows within some job."""
-    per_job_gpus, per_job_rows = {}, {}
-    for r in rows:
-        if not r.pending:
-            per_job_gpus.setdefault(r.jobid, set()).add((r.host, r.gpu))
-            per_job_rows[r.jobid] = per_job_rows.get(r.jobid, 0) + 1
-    show = {"gpu": any(len(v) > 1 for v in per_job_gpus.values()),
-            "pid": any(v > 1 for v in per_job_rows.values())}
-    return [c for c in COLS if show.get(c[0], True)]
-
-
-def _cell(r, key):
-    """(text, style) for one process-table cell."""
+def _common_cell(r, key):
     if key == "job":
         return r.display, "cyan" if not r.pending else B
     if key == "name":
@@ -619,68 +663,215 @@ def _cell(r, key):
         return fmt_dur(r.jtime), left_style(r.left, r.limit) or None
     if key == "node":
         return r.node or "-", B
-    if key == "gpu":
-        return r.gpu_label, None
-    if key == "pid":
-        return (str(r.pid) if r.pid else "-"), B
     if key == "gmem":
         return (f"{r.gmem / 1024:.1f}GiB" if r.gmem is not None else "-"), "magenta"
     if key == "sm":
         return (f"{r.sm:.0f}" if r.sm is not None else "-"), util_style(r.sm)
-    if key == "gmbw":
-        return (f"{r.gmbw:.0f}" if r.gmbw is not None else "-"), None
-    if key == "cpu":
-        return (f"{r.cpu:.1f}" if r.cpu is not None else "-"), None
     if key == "mem":
         return (f"{r.mem:.1f}" if r.mem is not None else "-"), None
-    return "-", None
+    return None
 
 
-def cell_text_at(rows, r, x):
-    """Full, untruncated text of the process-table cell at column x of row r (for copying)."""
+class TableView:
+    """One way of listing jobs: its columns (key, header, width, default descending?, left-aligned?,
+    sections: "g" GPU jobs / "c" CPU-only jobs), sort keys, rows and cells."""
+    name = ""
+    COLS: list = []
+    SORT_KEYS: dict = {}
+
+    def rows(self, m):
+        raise NotImplementedError
+
+    def value(self, r, key):
+        return getattr(r, key)
+
+    def cell(self, r, key):
+        raise NotImplementedError
+
+    def cols(self, rows, gpu_job):
+        sec = "g" if gpu_job else "c"
+        return [c for c in self.COLS if sec in c[5]]
+
+
+class JobView(TableView):
+    name = "jobs"
+    COLS = [
+        ("job", "JOB", 18, False, True, "gc"),    # fits pending array ranges, e.g. 1234567_[10-99%4]
+        ("name", "NAME", 16, False, True, "gc"),
+        ("gres", "GRES", 9, False, True, "g"),
+        ("time", "TIME", 10, True, False, "gc"),
+        ("node", "NODE", 9, False, True, "gc"),
+        ("gmem", "GPU-MEM", 8, True, False, "g"),
+        ("util", "%UTL", 4, True, False, "g"),
+        ("sm", "%SM", 4, True, False, "g"),
+        ("cpu", "CPU", 9, True, False, "gc"),
+        ("mem", "%MEM", 5, True, False, "gc"),
+        ("nproc", "PROCS", 5, True, False, "gc"),
+    ]
+    SORT_KEYS = {"j": "job", "n": "name", "r": "gres", "t": "time", "d": "node", "g": "gmem", "u": "util", "s": "sm",
+                 "c": "cpu", "m": "mem", "p": "nproc"}
+
+    def rows(self, m):
+        return job_rows(m)
+
+    def value(self, r, key):
+        if key == "job":
+            return r.jobid
+        if key == "cpu":
+            return r.cores
+        return r.jtime if key == "time" else getattr(r, key)
+
+    def cell(self, r, key):
+        c = _common_cell(r, key)
+        if c:
+            return c
+        if key == "util":
+            return (f"{r.util:.0f}" if r.util is not None else "-"), util_style(r.util)
+        if key == "cpu":
+            return _cpu_cell(r)
+        if key == "nproc":
+            return (str(r.nproc) if r.nproc is not None else "-"), None
+        return "-", None
+
+
+class ProcView(TableView):
+    name = "processes"
+    COLS = [
+        ("job", "JOB", 18, False, True, "gc"),
+        ("name", "NAME", 16, False, True, "gc"),
+        ("gres", "GRES", 9, False, True, "g"),
+        ("time", "TIME", 10, True, False, "gc"),
+        ("node", "NODE", 9, False, True, "gc"),
+        ("gpu", "GPU", 6, False, False, "g"),      # only shown when some job has several GPUs
+        ("pid", "PID", 8, False, False, "gc"),     # only shown when some job has several processes
+        ("gmem", "GPU-MEM", 8, True, False, "g"),
+        ("sm", "%SM", 4, True, False, "g"),
+        ("gmbw", "%GMBW", 5, True, False, "g"),
+        ("cpu", "%CPU", 6, True, False, "gc"),
+        ("mem", "%MEM", 5, True, False, "gc"),
+    ]
+    SORT_KEYS = {"j": "job", "n": "name", "r": "gres", "t": "time", "d": "node", "i": "gpu", "p": "pid",
+                 "g": "gmem", "s": "sm", "b": "gmbw", "c": "cpu", "m": "mem"}
+
+    def rows(self, m):
+        return proc_rows(m)
+
+    def value(self, r, key):
+        if key == "job":
+            return (r.jobid, r.gpu, r.pid)
+        if key == "gpu":
+            return (r.host, r.gpu, r.pid)
+        return r.jtime if key == "time" else getattr(r, key)
+
+    def cols(self, rows, gpu_job):
+        """Drop GPU / PID unless they distinguish rows within some job of this section."""
+        per_job_gpus, per_job_rows = {}, {}
+        for r in rows:
+            if not r.pending and r.gpu_job == gpu_job:
+                per_job_gpus.setdefault(r.jobid, set()).add((r.host, r.gpu))
+                per_job_rows[r.jobid] = per_job_rows.get(r.jobid, 0) + 1
+        show = {"gpu": any(len(v) > 1 for v in per_job_gpus.values()),
+                "pid": any(v > 1 for v in per_job_rows.values())}
+        return [c for c in super().cols(rows, gpu_job) if show.get(c[0], True)]
+
+    def cell(self, r, key):
+        c = _common_cell(r, key)
+        if c:
+            return c
+        if key == "gpu":
+            return r.gpu_label, None
+        if key == "pid":
+            return (str(r.pid) if r.pid else "-"), B
+        if key == "gmbw":
+            return (f"{r.gmbw:.0f}" if r.gmbw is not None else "-"), None
+        if key == "cpu":
+            return (f"{r.cpu:.1f}" if r.cpu is not None else "-"), None
+        return "-", None
+
+
+VIEWS = {"jobs": JobView(), "processes": ProcView()}
+
+
+def sort_rows(view, rows, key, reverse):
+    """GPU jobs first, then CPU-only jobs; each section sorted on its own, pending jobs last in job order."""
+    def k(r):
+        v = view.value(r, key)
+        return (v is None, v if v is not None else 0)
+    desc = {c[0]: c[3] for c in view.COLS}[key] != reverse
+    out = []
+    for gpu in (True, False):
+        sec = [r for r in rows if r.gpu_job == gpu]
+        running = [r for r in sec if not r.pending]
+        out += sorted([r for r in running if not k(r)[0]], key=k, reverse=desc)
+        out += [r for r in running if k(r)[0]] + [r for r in sec if r.pending]
+    return out
+
+
+def table_items(rows):
+    """Display lines of the table: ("title", gpu?), ("hdr", gpu?) and ("row", index into rows)."""
+    items = []
+    for gpu in (True, False):
+        idx = [i for i, r in enumerate(rows) if r.gpu_job == gpu]
+        if idx:
+            items += [("title", gpu), ("hdr", gpu)] + [("row", i) for i in idx]
+    return items
+
+
+def cell_text_at(view, rows, r, x):
+    """Full, untruncated text of the table cell at column x of row r (for copying)."""
     pos = 2   # "│" + leading space
-    for key, _, w, _, _ in visible_cols(rows):
+    for key, _, w, _, _, _ in view.cols(rows, r.gpu_job):
         if x < pos + w:
-            return (r.node or "-") if key == "node" else _cell(r, key)[0] if x >= pos else None
+            return view.cell(r, key)[0] if x >= pos else None
         pos += w + 1
     return r.reason if r.pending else r.args
 
 
-def render_procs(rows, width, height, cursor, offset, hscroll, sort_key, sort_rev, user):
+def render_table(view, rows, items, width, height, cursor, offset, hscroll, sort_key, sort_rev, user):
     inner = width - 2
-    cols = visible_cols(rows)
     out = [Text("╒" + "═" * inner + "╕", style=B)]
-    title = Text(" Jobs & processes:", style="bold")
+    title = Text(" Jobs" if view.name == "jobs" else " Jobs, by process", style="bold")
+    title.append("   v: " + ("per-process view" if view.name == "jobs" else "per-job view"), style=B)
     who = f"{user}@{os.uname().nodename.split('.')[0]} "
     title.append(" " * max(1, inner - len(title.plain) - len(who)))
     title.append(who, style="bold")
     out.append(Text("│", style=B) + fit(title, inner) + Text("│", style=B))
-    hdr = Text(" ")
-    for key, name, w, desc, left in cols:
-        mark = ("▼" if desc != sort_rev else "▲") if key == sort_key else ""
-        label = f"{name}{mark}"
-        hdr.append(f"{label:<{w}} " if left else f"{label:>{w}} ", style="bold underline" if key == sort_key else "bold")
-    hdr.append("COMMAND / REASON", style="bold")
-    out.append(Text("│", style=B) + fit(hdr, inner) + Text("│", style=B))
-    out.append(Text("╞" + "═" * inner + "╡", style=B))
     body_h = max(0, height - len(out) - 1)
     if not rows:
         out.append(Text("│", style=B) + fit(Text("  no running or pending jobs", style=B), inner) + Text("│", style=B))
-        body_h -= 1
-    for i, r in enumerate(rows[offset: offset + body_h], start=offset):
+    cols = {gpu: view.cols(rows, gpu) for gpu in (True, False)}
+    njobs = {gpu: len({r.jobid for r in rows if r.gpu_job == gpu}) for gpu in (True, False)}
+    for kind, v in items[offset: offset + body_h]:
+        if kind == "title":
+            label = f"─ {'GPU jobs' if v else 'CPU-only jobs'} ({njobs[v]}) "
+            line = Text("╞" + label + "═" * max(0, inner - len(label)) + "╡", style=B)
+            line.stylize("bold", 1, 1 + len(label))
+            out.append(line)
+            continue
+        if kind == "hdr":
+            hdr = Text(" ")
+            for key, name, w, desc, left, _ in cols[v]:
+                mark = ("▼" if desc != sort_rev else "▲") if key == sort_key else ""
+                label = f"{name}{mark}"
+                hdr.append(f"{label:<{w}} " if left else f"{label:>{w}} ",
+                           style="bold underline" if key == sort_key else "bold")
+            hdr.append("COMMAND / REASON", style="bold")
+            out.append(Text("│", style=B) + fit(hdr, inner) + Text("│", style=B))
+            continue
+        r = rows[v]
         t = Text(" ")
-        for key, _, w, _, left in cols:
-            val, style = _cell(r, key)
+        for key, _, w, _, left, _ in cols[r.gpu_job]:
+            val, style = view.cell(r, key)
             val = val[:w]
             t.append(f"{val:<{w}} " if left else f"{val:>{w}} ", style=style or "")
         if r.pending:
             t.append(f"({r.reason})", style="yellow")
         else:
-            t.append(short_args(r.args)[hscroll:])
+            t.append(short_args(r.args)[hscroll:], style=B if not r.pid else "")
         line = fit(t, inner)
         if r.pending:
             line.stylize("bright_black", 0, len(line.plain) - len(f"({r.reason})") - 1)
-        if i == cursor:
+        if v == cursor:
             line = Text(line.plain, style="bold black on cyan")   # one uniform bar, like nvitop
         out.append(Text("│", style=B) + line + Text("│", style=B))
     while len(out) < height - 1:
