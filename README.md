@@ -60,6 +60,7 @@ Keys (press `h` in the app for the full list):
 | `g` | cluster GPUs: one row per GPU type (`n`: per node); `Enter` on a type shows its nodes and pending jobs |
 | `r` / `F5` | re-poll squeue now |
 | `[` `]` | poll squeue less / more often (5 s … 10 min; starts at `--squeue-s`) |
+| `s` | settings popup: squeue / cluster-view poll intervals, GPU / process sample intervals, display mode, table rows, chart zoom. `↑↓` pick, `←→` or the `−` `+` buttons change, `Esc` closes. GPU / process rates apply on close by restarting each job's monitoring step (one `srun` per job; collected history is kept) |
 | `q` / `Ctrl-C` | quit |
 
 Cluster GPU view (`g`, `--gpus`):

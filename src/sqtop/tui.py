@@ -9,10 +9,10 @@ from rich.console import Group
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.screen import Screen
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from .cluster import ClusterMonitor, render_detail, render_summary
 from .core import (
@@ -57,6 +57,17 @@ Screen { background: ansi_default; color: ansi_default; }
 #devices, #host, #charts { height: auto; }
 #procs, #jobs { height: 1fr; }
 .pad { padding: 0 1; }
+
+SettingsScreen { align: center middle; background: $background 50%; }
+#settings { width: 80; height: auto; border: round green; padding: 0 1; background: $surface; }
+#settings .title { text-style: bold; color: green; padding-bottom: 1; }
+#settings .hint { color: $text-muted; padding-top: 1; }
+.setting { height: 1; }
+.setting.sel { background: $boost; text-style: bold; }
+.setting .lbl { width: 30; }
+.setting .val { width: 12; text-align: right; padding-right: 1; }
+.setting .key { width: 1fr; color: $text-muted; padding-left: 1; }
+.setting Button { min-width: 5; width: 5; height: 1; border: none; padding: 0; }
 """
 
 
@@ -65,7 +76,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
 
   a f c    display mode: auto / full / compact      h ?     this help
   r F5     re-poll squeue now                       q ^C    quit
-  [ ]      poll squeue less / more often (5s … 10m)
+  [ ]      poll squeue less / more often (5s … 10m)  s       settings popup (poll rates, mode, view, zoom)
 
   ↑ ↓      select row                               Esc     clear selection
   Home End first / last row                         PgUp PgDn  page through rows
@@ -107,15 +118,114 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
 Press any key to return."""
 
 
-def step_interval(cur, d):
-    """Next interval in SQUEUE_STEPS above (d=+1) or below (d=-1) cur; cur needn't be one of the steps."""
+CLUSTER_STEPS = (15, 30, 60, 120, 300, 600)
+GPU_MS_STEPS = (250, 500, 1000, 2000, 5000)
+PROC_S_STEPS = (1, 2, 5, 10, 30)
+
+
+def step_interval(cur, d, steps=SQUEUE_STEPS):
+    """Next value in `steps` above (d=+1) or below (d=-1) cur; cur needn't be one of the steps."""
     if d > 0:
-        return next((x for x in SQUEUE_STEPS if x > cur), SQUEUE_STEPS[-1])
-    return next((x for x in reversed(SQUEUE_STEPS) if x < cur), SQUEUE_STEPS[0])
+        return next((x for x in steps if x > cur), steps[-1])
+    return next((x for x in reversed(steps) if x < cur), steps[0])
 
 
 def fmt_interval(s):
     return f"{s / 60:g}m" if s >= 60 and s % 60 == 0 else f"{s:g}s"
+
+
+class SettingsScreen(ModalScreen):
+    """Popup with every adjustable setting: ↑↓ pick, ←→ (or the buttons) change, Esc/s/q close.
+    GPU / process sample rates restart each job's monitoring step, so they apply on close."""
+
+    def __init__(self, main: "MainScreen"):
+        super().__init__()
+        self.main, self.m, self.cm = main, main.m, main.app.cm
+        self.i = 0
+        self.gpu_ms, self.proc_s = self.m.a.gpu_ms, self.m.a.proc_s   # pending until close
+        a, mn = self.m.a, main
+        modes = ["a", "f", "c"]
+        # (label, shortcut on the main screen, show(), change(d))  d = +1 means "more" (faster / zoom in)
+        self.settings = [
+            ("squeue poll interval", "[ ]", lambda: fmt_interval(a.squeue_s),
+             lambda d: setattr(a, "squeue_s", step_interval(a.squeue_s, -d))),
+            ("cluster view poll (g)", "", lambda: fmt_interval(self.cm.interval),
+             lambda d: setattr(self.cm, "interval", step_interval(self.cm.interval, -d, CLUSTER_STEPS))),
+            ("GPU sample interval *", "", lambda: f"{self.gpu_ms}ms",
+             lambda d: setattr(self, "gpu_ms", step_interval(self.gpu_ms, -d, GPU_MS_STEPS))),
+            ("process sample interval *", "", lambda: fmt_interval(self.proc_s),
+             lambda d: setattr(self, "proc_s", step_interval(self.proc_s, -d, PROC_S_STEPS))),
+            ("display mode", "a f c", lambda: {"a": "auto", "f": "full", "c": "compact"}[mn.mode],
+             lambda d: setattr(mn, "mode", modes[(modes.index(mn.mode) + d) % 3])),
+            ("table rows", "v", lambda: "per job" if mn.view.name == "jobs" else "per process",
+             lambda d: mn.toggle_view()),
+            ("chart zoom (s per dot)", "+ -", lambda: fmt_interval(RES_STEPS[mn.res_i]),
+             lambda d: setattr(mn, "res_i", max(0, min(len(RES_STEPS) - 1, mn.res_i - d)))),
+        ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings"):
+            yield Static("sqtop settings", classes="title")
+            for n, (label, key, _, _) in enumerate(self.settings):
+                with Horizontal(classes="setting", id=f"set{n}"):
+                    yield Static(label, classes="lbl")
+                    yield Button("−", id=f"dn{n}", compact=True)
+                    yield Static("", classes="val", id=f"val{n}")
+                    yield Button("+", id=f"up{n}", compact=True)
+                    yield Static(key, classes="key")
+            yield Static("↑↓ select · ←→ / -+ change · Esc s q close\n"
+                         "* applied on close: restarts each job's monitoring step (history is kept)",
+                         classes="hint")
+
+    def on_mount(self):
+        for b in self.query(Button):
+            b.can_focus = False   # keep arrows for the menu itself
+        self.refresh_values()
+
+    def refresh_values(self):
+        for n, (_, _, show, _) in enumerate(self.settings):
+            self.query_one(f"#val{n}", Static).update(show())
+            self.query_one(f"#set{n}").set_class(n == self.i, "sel")
+        self.main.tick()
+
+    def change(self, n, d):
+        self.i = n
+        self.settings[n][3](d)
+        self.refresh_values()
+
+    def on_button_pressed(self, event):
+        bid = event.button.id
+        self.change(int(bid[2:]), +1 if bid.startswith("up") else -1)
+        event.stop()
+
+    def on_click(self, event):
+        w = event.widget
+        while w is not None and not (w.id or "").startswith("set"):
+            w = w.parent
+        if w is not None and w.id[3:].isdigit():
+            self.i = int(w.id[3:])
+            self.refresh_values()
+
+    def on_key(self, event):
+        k, ch = event.key, event.character
+        if k in ("escape", "q") or ch == "s":
+            self.dismiss()
+        elif k == "up":
+            self.i = (self.i - 1) % len(self.settings)
+            self.refresh_values()
+        elif k == "down":
+            self.i = (self.i + 1) % len(self.settings)
+            self.refresh_values()
+        elif k in ("right", "enter") or ch in ("+", "=", "l"):
+            self.change(self.i, +1)
+        elif k == "left" or ch in ("-", "_", "h"):
+            self.change(self.i, -1)
+        event.stop()
+
+    def on_unmount(self):
+        if (self.gpu_ms, self.proc_s) != (self.m.a.gpu_ms, self.m.a.proc_s):
+            self.m.set_rates(self.gpu_ms, self.proc_s)
+            self.main.note(f"restarting monitors: gpu {self.gpu_ms}ms · procs {fmt_interval(self.proc_s)}")
 
 
 class Lines(Widget):
@@ -253,10 +363,10 @@ class MainScreen(Screen):
         else:
             st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · v jobs/procs · e env · l log · g gpus · o sort"
                       " · a/f/c mode"
-                      " · +/- zoom · [/] squeue rate",
+                      " · +/- zoom · [/] squeue rate · s settings",
                       style=B)
         age = time.time() - self.m.last_squeue if self.m.last_squeue else 0
-        right = f"gpu {self.m.a.gpu_ms}ms · procs {self.m.a.proc_s:g}s · squeue {fmt_interval(self.m.a.squeue_s)} ({age:.0f}s ago) "
+        right = f"gpu {self.m.a.gpu_ms}ms · procs {fmt_interval(self.m.a.proc_s)} · squeue {fmt_interval(self.m.a.squeue_s)} ({age:.0f}s ago) "
         st.append(" " * max(1, w - len(st.plain) - len(right)))
         st.append(right, style=B)
         if self.m.squeue_err:
@@ -334,6 +444,8 @@ class MainScreen(Screen):
         elif k in ("r", "f5"):
             self.m.kick.set()
             self.note("re-polling squeue…")
+        elif ch == "s":
+            self.app.push_screen(SettingsScreen(self))
         elif ch in ("[", "]"):
             self.m.a.squeue_s = step_interval(self.m.a.squeue_s, +1 if ch == "[" else -1)
             self.note(f"squeue every {fmt_interval(self.m.a.squeue_s)}")

@@ -240,8 +240,11 @@ class Proc:
 class Stream:
     """One `srun --overlap` step streaming metrics for one job, plus Prometheus backfill."""
 
-    def __init__(self, job: Job, gpu_ms: int, proc_s: float, prom: str | None):
-        self.job = job
+    # state a replacement stream (same job, new sample rates) takes over so charts keep their history
+    CARRY = ("lock", "gpus", "procs", "node", "nhist", "phist", "pmon", "backfill", "_pmon_cols", "_prev_cpu", "_prev_pid")
+
+    def __init__(self, job: Job, gpu_ms: int, proc_s: float, prom: str | None, prev: "Stream | None" = None):
+        self.job, self.gpu_ms, self.proc_s = job, gpu_ms, proc_s
         self.lock = threading.Lock()
         self.gpus: dict[tuple[str, int], GPU] = {}
         self.procs: dict[str, list[Proc]] = {}                       # host -> procs
@@ -255,6 +258,10 @@ class Stream:
         self._pending: dict[str, dict] = {}
         self._prev_cpu: dict[str, tuple[float, float]] = {}
         self._prev_pid: dict[tuple[str, int], tuple[float, float]] = {}
+        if prev:
+            for name in self.CARRY:   # shared lock too: the old step may write a last line or two
+                setattr(self, name, getattr(prev, name))
+            prom = None               # history is already there
         cmd = [*PDEATH, "srun", "--overlap", f"--jobid={job.jobid}", f"--job-name={STEP_NAME}", "--chdir=/",
                "-N", str(job.nnodes), "--ntasks-per-node=1", "--unbuffered", "--quiet",
                "bash", "-c", REMOTE, STEP_NAME, str(gpu_ms), str(proc_s), str(int(job.has_gpu))]
@@ -478,11 +485,27 @@ class Monitor:
             start = time.time()
             # re-read squeue_s each second so a change from the TUI ([ / ]) takes effect mid-wait
             while time.time() < start + self.a.squeue_s and not self.stop_evt.is_set():
+                self.apply_rates()
                 if self.kick.wait(1):
                     self.kick.clear()
                     break
                 if any(not s.alive() for s in list(self.streams.values())):
                     break
+
+    def set_rates(self, gpu_ms, proc_s):
+        """Change the GPU / process sample intervals. squeue_loop's thread then restarts each running
+        job's monitoring step with them (one srun per job), keeping what it has collected so far.
+        The restart must happen there: --pdeathsig fires when the *thread* that spawned srun exits."""
+        self.a.gpu_ms, self.a.proc_s = gpu_ms, proc_s
+
+    def apply_rates(self):
+        with self.lock:
+            for jid, old in list(self.streams.items()):
+                if old.alive() and (old.gpu_ms, old.proc_s) != (self.a.gpu_ms, self.a.proc_s):
+                    old.on_exit = None
+                    old.stop()
+                    st = self.streams[jid] = Stream(old.job, self.a.gpu_ms, self.a.proc_s, self.prom, prev=old)
+                    st.on_exit = self.kick.set
 
     def shutdown(self):
         self.stop_evt.set()

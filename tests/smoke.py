@@ -19,9 +19,10 @@ from sqtop.core import STEP_NAME, Monitor
 from sqtop.tui import SqTop
 
 
-def leftover_steps():
-    out = subprocess.run(["squeue", "-u", os.environ["USER"], "-s", "-h", "-o", "%j"], capture_output=True, text=True).stdout
-    return sum(1 for ln in out.split() if ln.startswith(STEP_NAME))
+def sqtop_steps():
+    """Step IDs of sqtop monitoring steps currently running in your jobs."""
+    out = subprocess.run(["squeue", "-u", os.environ["USER"], "-s", "-h", "-o", "%i %j"], capture_output=True, text=True).stdout
+    return {ln.split()[0] for ln in out.splitlines() if len(ln.split()) == 2 and ln.split()[1].startswith(STEP_NAME)}
 
 
 async def drive(m, size, out):
@@ -42,6 +43,8 @@ async def drive(m, size, out):
             ("6d_jobs_view", ["escape", "v"], 1),
             ("7_help", ["h"], 0.5),
             ("8_zoomed", ["x", "f", "-", "-", "-"], 1),
+            ("8b_settings", ["s", "down", "down", "right", "right", "left", "down", "left"], 1),
+            ("8c_settings_applied", ["escape"], 8),
             ("9_gpus", ["g"], 4),
             ("10_gpus_nodes", ["n", "down"], 0.5),
             ("11_gpu_type", ["n", "down", "down", "enter"], 1),
@@ -52,6 +55,7 @@ async def drive(m, size, out):
             await pilot.pause(wait)
             app.save_screenshot(f"{out}/{name}.svg")
             shots.append((name, keys))
+        assert (m.a.gpu_ms, m.a.proc_s) == (500, 5), (m.a.gpu_ms, m.a.proc_s)
         assert len(app.screen_stack) >= 2, f"screen stack collapsed: {app.screen_stack}"
     return shots
 
@@ -77,6 +81,7 @@ def main():
     for j in running:
         assert "gpus" in j or "cpu" in j, f"no data for {j['id']}: {j.get('errors')}"
 
+    before = sqtop_steps()   # e.g. from an sqtop you have open: not ours to clean up
     m = Monitor(args)
     threading.Thread(target=m.squeue_loop, daemon=True).start()
     try:
@@ -85,11 +90,11 @@ def main():
     finally:
         m.shutdown()
     for _ in range(12):
-        if leftover_steps() == 0:
+        if not sqtop_steps() - before:
             break
         time.sleep(5)
-    n = leftover_steps()
-    assert n == 0, f"{n} {STEP_NAME} steps left running"
+    left = sqtop_steps() - before
+    assert not left, f"{len(left)} {STEP_NAME} steps left running: {sorted(left)}"
     print("no monitoring steps left behind: ok")
 
 
