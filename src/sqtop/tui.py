@@ -76,7 +76,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
 
   a f c    display mode: auto / full / compact      h ?     this help
   r F5     re-poll squeue now                       q ^C    quit
-  [ ]      poll squeue less / more often (5s … 10m)  s       settings popup (poll rates, mode, view, zoom)
+  [ ]      squeue interval shorter / longer (5s … 10m)  s       settings popup (poll rates, mode, view, zoom)
 
   ↑ ↓      select row                               Esc     clear selection
   Home End first / last row                         PgUp PgDn  page through rows
@@ -89,7 +89,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   g        cluster GPUs: free / queued by GPU type or by node (Enter on a type: its nodes + queue)
   e        environment of the selected process / job's main process (fetched on demand)
   l        tail the selected job's log (StdOut/StdErr; Tab switches)
-  + -      zoom charts (seconds per braille dot)
+  + -      chart zoom: more / fewer seconds per braille dot
 
   The bottom table has two sections, GPU jobs then CPU-only jobs, with pending jobs
   listed last in each with their reason. TIME is the job's elapsed time.
@@ -145,22 +145,22 @@ class SettingsScreen(ModalScreen):
         self.gpu_ms, self.proc_s = self.m.a.gpu_ms, self.m.a.proc_s   # pending until close
         a, mn = self.m.a, main
         modes = ["a", "f", "c"]
-        # (label, shortcut on the main screen, show(), change(d))  d = +1 means "more" (faster / zoom in)
+        # (label, shortcut on the main screen, show(), change(d))  d = +1 raises the value (right / + / ])
         self.settings = [
             ("squeue poll interval", "[ ]", lambda: fmt_interval(a.squeue_s),
-             lambda d: setattr(a, "squeue_s", step_interval(a.squeue_s, -d))),
+             lambda d: setattr(a, "squeue_s", step_interval(a.squeue_s, d))),
             ("cluster view poll (g)", "", lambda: fmt_interval(self.cm.interval),
-             lambda d: setattr(self.cm, "interval", step_interval(self.cm.interval, -d, CLUSTER_STEPS))),
+             lambda d: setattr(self.cm, "interval", step_interval(self.cm.interval, d, CLUSTER_STEPS))),
             ("GPU sample interval *", "", lambda: f"{self.gpu_ms}ms",
-             lambda d: setattr(self, "gpu_ms", step_interval(self.gpu_ms, -d, GPU_MS_STEPS))),
+             lambda d: setattr(self, "gpu_ms", step_interval(self.gpu_ms, d, GPU_MS_STEPS))),
             ("process sample interval *", "", lambda: fmt_interval(self.proc_s),
-             lambda d: setattr(self, "proc_s", step_interval(self.proc_s, -d, PROC_S_STEPS))),
+             lambda d: setattr(self, "proc_s", step_interval(self.proc_s, d, PROC_S_STEPS))),
             ("display mode", "a f c", lambda: {"a": "auto", "f": "full", "c": "compact"}[mn.mode],
              lambda d: setattr(mn, "mode", modes[(modes.index(mn.mode) + d) % 3])),
             ("table rows", "v", lambda: "per job" if mn.view.name == "jobs" else "per process",
              lambda d: mn.toggle_view()),
             ("chart zoom (s per dot)", "+ -", lambda: fmt_interval(RES_STEPS[mn.res_i]),
-             lambda d: setattr(mn, "res_i", max(0, min(len(RES_STEPS) - 1, mn.res_i - d)))),
+             lambda d: setattr(mn, "res_i", max(0, min(len(RES_STEPS) - 1, mn.res_i + d)))),
         ]
 
     def compose(self) -> ComposeResult:
@@ -447,7 +447,7 @@ class MainScreen(Screen):
         elif ch == "s":
             self.app.push_screen(SettingsScreen(self))
         elif ch in ("[", "]"):
-            self.m.a.squeue_s = step_interval(self.m.a.squeue_s, +1 if ch == "[" else -1)
+            self.m.a.squeue_s = step_interval(self.m.a.squeue_s, +1 if ch == "]" else -1)
             self.note(f"squeue every {fmt_interval(self.m.a.squeue_s)}")
         elif k == "down":
             self.move_cursor(+1)
@@ -491,10 +491,10 @@ class MainScreen(Screen):
             self.sort_rev = not self.sort_rev
             self.tick()
         elif ch in ("+", "="):
-            self.res_i = max(0, self.res_i - 1)
+            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
             self.tick()
         elif ch in ("-", "_"):
-            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
+            self.res_i = max(0, self.res_i - 1)
             self.tick()
         elif k == "enter":
             r = self.sel_row()
@@ -783,10 +783,10 @@ class JobScreen(Screen):
         if event.key in ("escape", "q", "enter"):
             self.app.pop_screen()
         elif ch in ("+", "="):
-            self.res_i = max(0, self.res_i - 1)
+            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
             self.tick()
         elif ch in ("-", "_"):
-            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
+            self.res_i = max(0, self.res_i - 1)
             self.tick()
         elif ch == "e":
             if self.r and self.r.pid:
@@ -898,10 +898,10 @@ class ProcScreen(Screen):
         if event.key in ("escape", "q", "enter"):
             self.app.pop_screen()
         elif ch in ("+", "="):
-            self.res_i = max(0, self.res_i - 1)
+            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
             self.tick()
         elif ch in ("-", "_"):
-            self.res_i = min(len(RES_STEPS) - 1, self.res_i + 1)
+            self.res_i = max(0, self.res_i - 1)
             self.tick()
         elif ch == "e":
             self.app.push_screen(EnvScreen(self.r))

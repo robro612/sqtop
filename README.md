@@ -55,11 +55,11 @@ Keys (press `h` in the app for the full list):
 | `l` | tail the job's log (StdOut/StdErr; `Tab` switches) |
 | `o` + letter, `,` `.`, `/` | sort: `j` job, `n` name, `r` gres, `t` time, `d` node, `g` GPU-mem, `s` %SM, `c` CPU, `m` %MEM; job view also `u` %UTL, `p` procs; process view also `b` %GMBW, `i` GPU, `p` PID; `/` flips direction |
 | `a` `f` `c` | display mode: auto / full / compact |
-| `+` `-` | zoom charts (seconds per braille dot) |
+| `+` `-` | chart zoom: more / fewer seconds per braille dot |
 | `←` `→` `^` `$` | scroll the command column |
 | `g` | cluster GPUs: one row per GPU type (`n`: per node); `Enter` on a type shows its nodes and pending jobs |
 | `r` / `F5` | re-poll squeue now |
-| `[` `]` | poll squeue less / more often (5 s … 10 min; starts at `--squeue-s`) |
+| `[` `]` | squeue poll interval shorter / longer (5 s … 10 min; starts at `--squeue-s`) |
 | `s` | settings popup: squeue / cluster-view poll intervals, GPU / process sample intervals, display mode, table rows, chart zoom. `↑↓` pick, `←→` or the `−` `+` buttons change, `Esc` closes. GPU / process rates apply on close by restarting each job's monitoring step (one `srun` per job; collected history is kept) |
 | `q` / `Ctrl-C` | quit |
 

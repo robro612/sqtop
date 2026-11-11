@@ -22,7 +22,11 @@ from sqtop.tui import SqTop
 def sqtop_steps():
     """Step IDs of sqtop monitoring steps currently running in your jobs."""
     out = subprocess.run(["squeue", "-u", os.environ["USER"], "-s", "-h", "-o", "%i %j"], capture_output=True, text=True).stdout
-    return {ln.split()[0] for ln in out.splitlines() if len(ln.split()) == 2 and ln.split()[1].startswith(STEP_NAME)}
+    # when run via sbatch, steps in the test's own job are skipped: an sqtop you have open monitors it
+    # too, and anything in it ends with the job anyway
+    own = os.environ.get("SLURM_JOB_ID")
+    return {ln.split()[0] for ln in out.splitlines() if len(ln.split()) == 2 and ln.split()[1].startswith(STEP_NAME)
+            and not (own and ln.split()[0].startswith(own + "."))}
 
 
 async def drive(m, size, out):
@@ -42,7 +46,7 @@ async def drive(m, size, out):
             ("6c_proc_metrics", ["enter"], 3),
             ("6d_jobs_view", ["escape", "v"], 1),
             ("7_help", ["h"], 0.5),
-            ("8_zoomed", ["x", "f", "-", "-", "-"], 1),
+            ("8_zoomed", ["x", "f", "+", "+", "+"], 1),
             ("8b_settings", ["s", "down", "down", "right", "right", "left", "down", "left"], 1),
             ("8c_settings_applied", ["escape"], 8),
             ("9_gpus", ["g"], 4),
@@ -55,7 +59,7 @@ async def drive(m, size, out):
             await pilot.pause(wait)
             app.save_screenshot(f"{out}/{name}.svg")
             shots.append((name, keys))
-        assert (m.a.gpu_ms, m.a.proc_s) == (500, 5), (m.a.gpu_ms, m.a.proc_s)
+        assert (m.a.gpu_ms, m.a.proc_s) == (2000, 1), (m.a.gpu_ms, m.a.proc_s)
         assert len(app.screen_stack) >= 2, f"screen stack collapsed: {app.screen_stack}"
     return shots
 
