@@ -19,6 +19,7 @@ STEP_NAME = "sqtop"
 PDEATH = ["setpriv", "--pdeathsig", "TERM"] if shutil.which("setpriv") else []
 
 
+SQUEUE_STEPS = (5, 10, 15, 30, 60, 120, 300, 600)   # squeue intervals [ / ] step through in the TUI
 MISSING_POLLS = 2   # a live stream is stopped only after its job is absent from this many squeue polls
 
 
@@ -474,8 +475,9 @@ class Monitor:
     def squeue_loop(self):
         while not self.stop_evt.is_set():
             self.poll_squeue()
-            deadline = time.time() + self.a.squeue_s
-            while time.time() < deadline and not self.stop_evt.is_set():
+            start = time.time()
+            # re-read squeue_s each second so a change from the TUI ([ / ]) takes effect mid-wait
+            while time.time() < start + self.a.squeue_s and not self.stop_evt.is_set():
                 if self.kick.wait(1):
                     self.kick.clear()
                     break

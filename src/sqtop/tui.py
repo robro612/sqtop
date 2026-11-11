@@ -18,6 +18,7 @@ from .cluster import ClusterMonitor, render_detail, render_summary
 from .core import (
     PDEATH,
     RES_STEPS,
+    SQUEUE_STEPS,
     STEP_NAME,
     Job,
     Monitor,
@@ -64,6 +65,7 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
 
   a f c    display mode: auto / full / compact      h ?     this help
   r F5     re-poll squeue now                       q ^C    quit
+  [ ]      poll squeue less / more often (5s … 10m)
 
   ↑ ↓      select row                               Esc     clear selection
   Home End first / last row                         PgUp PgDn  page through rows
@@ -103,6 +105,17 @@ sqtop: nvitop-style view of your SLURM jobs' GPUs (read-only)
   RAM excludes page cache, which fills to the cgroup limit but is reclaimable.
 
 Press any key to return."""
+
+
+def step_interval(cur, d):
+    """Next interval in SQUEUE_STEPS above (d=+1) or below (d=-1) cur; cur needn't be one of the steps."""
+    if d > 0:
+        return next((x for x in SQUEUE_STEPS if x > cur), SQUEUE_STEPS[-1])
+    return next((x for x in reversed(SQUEUE_STEPS) if x < cur), SQUEUE_STEPS[0])
+
+
+def fmt_interval(s):
+    return f"{s / 60:g}m" if s >= 60 and s % 60 == 0 else f"{s:g}s"
 
 
 class Lines(Widget):
@@ -240,10 +253,10 @@ class MainScreen(Screen):
         else:
             st.append(" h help · q quit · r refresh · ↑↓ select · Enter metrics · v jobs/procs · e env · l log · g gpus · o sort"
                       " · a/f/c mode"
-                      " · +/- zoom",
+                      " · +/- zoom · [/] squeue rate",
                       style=B)
         age = time.time() - self.m.last_squeue if self.m.last_squeue else 0
-        right = f"gpu {self.m.a.gpu_ms}ms · procs {self.m.a.proc_s:g}s · squeue {self.m.a.squeue_s:g}s ({age:.0f}s ago) "
+        right = f"gpu {self.m.a.gpu_ms}ms · procs {self.m.a.proc_s:g}s · squeue {fmt_interval(self.m.a.squeue_s)} ({age:.0f}s ago) "
         st.append(" " * max(1, w - len(st.plain) - len(right)))
         st.append(right, style=B)
         if self.m.squeue_err:
@@ -321,6 +334,9 @@ class MainScreen(Screen):
         elif k in ("r", "f5"):
             self.m.kick.set()
             self.note("re-polling squeue…")
+        elif ch in ("[", "]"):
+            self.m.a.squeue_s = step_interval(self.m.a.squeue_s, +1 if ch == "[" else -1)
+            self.note(f"squeue every {fmt_interval(self.m.a.squeue_s)}")
         elif k == "down":
             self.move_cursor(+1)
         elif k == "up":

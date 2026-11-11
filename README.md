@@ -59,6 +59,7 @@ Keys (press `h` in the app for the full list):
 | `←` `→` `^` `$` | scroll the command column |
 | `g` | cluster GPUs: one row per GPU type (`n`: per node); `Enter` on a type shows its nodes and pending jobs |
 | `r` / `F5` | re-poll squeue now |
+| `[` `]` | poll squeue less / more often (5 s … 10 min; starts at `--squeue-s`) |
 | `q` / `Ctrl-C` | quit |
 
 Cluster GPU view (`g`, `--gpus`):
